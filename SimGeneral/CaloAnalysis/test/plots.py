@@ -106,7 +106,7 @@ def plot_radii(input_file, output_file=""):
     canvas.SaveAs(output_file)
 
 
-def plot_clusters(input_file, output_file="", description="", event=0):
+def plot_clusters(input_file, output_file="", description="", event=0, plotmerged=False, outrootfile=None):
     if not output_file:
         postfix = os.path.splitext(os.path.basename(input_file))[0].split("_", 1)[-1]
         output_file = "clusters_{}_evt{}.png".format(postfix, event)
@@ -116,11 +116,14 @@ def plot_clusters(input_file, output_file="", description="", event=0):
     pad.cd()
 
     # dummy histogram for axes
-    binning = (1, -5., 5., 1, -3.2, 5.)
+    binning = (50, 1.5, 3., 50, -3.2, 4.2)
     dummy_hist = ROOT.TH2F("hist", ";#eta;#phi;", *binning)
 
     # coordinates of calo particles
     cp_points = []
+    
+    #coordinates of the merged simclusters
+    msc_points = []
 
     # fill data
     handles = {
@@ -175,6 +178,8 @@ def plot_clusters(input_file, output_file="", description="", event=0):
         for calo_particle in calo_particles:
             cp_points.append((calo_particle.eta(), calo_particle.phi()))
 
+        for mergedsc in merged_clusters:
+            msc_points.append((mergedsc.eta(), mergedsc.phi()))
         # counts for some statistics
         n_rec_hits = len(det_ids)
         n_calo_particles = sum(1 for cp in calo_particles if p4_in_hgcal(cp.p4()))
@@ -190,6 +195,12 @@ def plot_clusters(input_file, output_file="", description="", event=0):
         array("f", [p[1] for p in cp_points]))
     r.setup_graph(cp_graph, {"MarkerStyle": 43, "MarkerSize": 2})
     cp_graph.Draw("P")
+    
+    if plotmerged:
+        msc_graph = ROOT.TGraph(len(msc_points), array("f", [p[0] for p in msc_points]),
+            array("f", [p[1] for p in msc_points]))
+        r.setup_graph(msc_graph, {"MarkerStyle": 5, "MarkerSize": 5, 'Color': 'kRed'})
+        msc_graph.Draw("P")
 
     # stats labels
     def create_stat_label(i, j, text):
@@ -221,17 +232,24 @@ def plot_clusters(input_file, output_file="", description="", event=0):
     r.setup_box(box, color="white")
     box.Draw()
 
+    if outrootfile is not None:
+        outrootfile.cd()
     r.update_canvas(canvas)
     canvas.SaveAs(output_file)
+    canvas.Write()
 
 
 if __name__ == "__main__":
     # plot_radii("digi_gun_e_e50To50_z0To0_n1_pu200.root")
     # plot_clusters("digi_gun_e_e50To50_z0To0_n1_pu200.root",
     #     description="Electron gun, 50 GeV, 200 PU")
-    for i in range(5):
-        plot_clusters("digi_gun_e_e30To30_z0To0_n5_pu0.root",
-            description="Electron gun, 30 GeV, 0 PU", event=i)
+    #for i in range(5):
+    #    plot_clusters("digi_gun_e_e30To30_z0To0_n5_pu0.root",
+    #        description="Electron gun, 30 GeV, 0 PU", event=i)
     # for i in range(3):
     #     plot_clusters("digi_gun_g_e30To30_z0To0_n5_pu0.root",
     #         description="Photon gun, 30 GeV, 0 PU", event=i)
+    f = ROOT.TFile("out.root","RECREATE")
+    for i in range(5):
+        plot_clusters("digi_gun_e_e50To50_z0To0_n5_pu0.root",event=i, plotmerged=True,outrootfile=f)
+    f.Close()

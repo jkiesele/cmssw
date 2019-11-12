@@ -909,7 +909,8 @@ void CaloTruthAccumulator::determineRealisticSimClusterGroups(const std::unique_
     // create four-vectors for each hit and the summed shower vector
     auto hitsAndEnergies = simClusters->at(iSC).hits_and_fractions();
     int nHits = (int)hitsAndEnergies.size();
-    math::XYZTLorentzVectorD showerVector;
+    math::XYZTLorentzVectorD showerVector (simClusters->at(iSC).p4().px(),simClusters->at(iSC).p4().py(),
+            simClusters->at(iSC).p4().pz(), simClusters->at(iSC).p4().E());//FIXME
     std::vector<math::XYZTLorentzVectorD> hitVectors;
     hitVectors.resize(hitsAndEnergies.size());
     std::vector<int> hitVectorIndices;
@@ -920,7 +921,7 @@ void CaloTruthAccumulator::determineRealisticSimClusterGroups(const std::unique_
       float energy = hitsAndEnergies[iH].second;
       float scale = energy / position.mag();
       hitVectors[iH].SetPxPyPzE(position.x() * scale, position.y() * scale, position.z() * scale, energy);
-      showerVector += hitVectors[iH];
+      //FIXME showerVector += hitVectors[iH];
       hitVectorIndices[iH] = iH;
     }
 
@@ -933,7 +934,8 @@ void CaloTruthAccumulator::determineRealisticSimClusterGroups(const std::unique_
         });
 
     // loop through hit vectors in order of the sorted indices until the target energy is reached
-    float radius = deltaR(showerVector, hitVectors[hitVectorIndices[nHits - 1]]);
+    //FIXME
+    __attribute__((unused)) float radius = deltaR(showerVector, hitVectors[hitVectorIndices[nHits - 1]]);
     if (nHits >= minShowerHits) {
       float sumEnergy = 0.;
 
@@ -969,7 +971,7 @@ void CaloTruthAccumulator::determineRealisticSimClusterGroups(const std::unique_
     }
 
     (*showerVectors)[iSC] = showerVector;
-    (*radii)[iSC] = radius;
+    (*radii)[iSC] = 0.01;//radius; //FIXME
   }
 
   gettimeofday(&tv, NULL);
@@ -1204,7 +1206,7 @@ bool CaloTruthAccumulator::checkSimClusterMerging(int iSC, int jSC,
   auto radius2 = radii->at(jSC);
 
   // define a combined radius using error propagation rules (as the pull is defined statistics-like)
-  auto combinedRadius = pow(radius1 * radius1 + radius2 * radius2, 0.5);
+  auto combinedRadius = radius1 ; //FIXME pow(radius1 * radius1 + radius2 * radius2, 0.5);
 
   // when both clusters have no radius, i.e., they are coming from single hits, make a quick
   // decision solely based in dR (FREE PARAMETER)
@@ -1216,7 +1218,7 @@ bool CaloTruthAccumulator::checkSimClusterMerging(int iSC, int jSC,
   auto pull = dR / combinedRadius;
 
   // use a simple merging criterion based on the pull (FREE PARAMETER)
-  return pull < 0.5;
+  return pull < 1.;
 
   // TODO: exploit information about common ancestors (e.g. useful for e/gamma, pi0, ...)
 }
