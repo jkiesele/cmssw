@@ -250,6 +250,8 @@ if __name__ == "__main__":
     #     plot_clusters("digi_gun_g_e30To30_z0To0_n5_pu0.root",
     #         description="Photon gun, 30 GeV, 0 PU", event=i)
     f = ROOT.TFile("out.root","RECREATE")
-    for i in range(5):
-        plot_clusters("digi_gun_e_e50To50_z0To0_n5_pu0.root",event=i, plotmerged=True,outrootfile=f)
+    for i in range(9):
+        plot_clusters("digi_pythia_ttbar_n10_pu0.root",event=i, plotmerged=True,outrootfile=f)
+    for i in range(9):
+        plot_clusters("digi_gun_e_e50To50_z0To0_n10_pu0.root",event=i, plotmerged=True,outrootfile=f)
     f.Close()

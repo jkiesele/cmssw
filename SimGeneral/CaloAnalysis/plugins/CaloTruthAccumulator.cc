@@ -1202,11 +1202,11 @@ bool CaloTruthAccumulator::checkSimClusterMerging(int iSC, int jSC,
     const std::unique_ptr<std::vector<math::XYZTLorentzVectorD>> &showerVectors) const {
   // get some values
   auto dR = deltaR(showerVectors->at(iSC), showerVectors->at(jSC));
-  auto radius1 = radii->at(iSC);
-  auto radius2 = radii->at(jSC);
+  auto radius1 = radii->at(iSC);//ignore the warning for now
+  auto radius2 = radii->at(jSC);//ignore the warning for now
 
   // define a combined radius using error propagation rules (as the pull is defined statistics-like)
-  auto combinedRadius = radius1 ; //FIXME pow(radius1 * radius1 + radius2 * radius2, 0.5);
+  auto combinedRadius = 0.016; //this is about 1 cm at eta = 3 on the HGCal frontface
 
   // when both clusters have no radius, i.e., they are coming from single hits, make a quick
   // decision solely based in dR (FREE PARAMETER)
