@@ -33,6 +33,8 @@
 #include "DataFormats/HcalDetId/interface/HcalDetId.h"
 #include "DataFormats/HcalDetId/interface/HcalTestNumbering.h"
 #include "DataFormats/HepMCCandidate/interface/GenParticle.h"
+#include "DataFormats/Math/interface/deltaR.h"
+#include "DataFormats/Math/interface/deltaPhi.h"
 #include "DataFormats/SiPixelDetId/interface/PixelSubdetector.h"
 #include "DataFormats/SiStripDetId/interface/StripSubdetector.h"
 
@@ -56,6 +58,15 @@
 #include "Geometry/HcalTowerAlgo/interface/HcalGeometry.h"
 #include "Geometry/Records/interface/CaloGeometryRecord.h"
 
+#include "RecoLocalCalo/HGCalRecAlgos/interface/RecHitTools.h"
+#include "RecoHGCal/GraphReco/interface/HGCalParticlePropagator.h"
+
+#include "TMath.h"
+#include "TCanvas.h"
+#include "TH1F.h"
+
+#include <sys/time.h>
+
 namespace {
   using Index_t = unsigned;
   using Barcode_t = int;
@@ -64,7 +75,7 @@ namespace {
 
 using boost::add_edge;
 using boost::adjacency_list;
-using boost::directedS;
+using boost::bidirectionalS;
 using boost::edge;
 using boost::edge_weight;
 using boost::edge_weight_t;
@@ -74,6 +85,12 @@ using boost::vecS;
 using boost::vertex;
 using boost::vertex_name;
 using boost::vertex_name_t;
+
+//DEBUG
+#include "TH2D.h"
+
+//debug
+
 
 /* GRAPH DEFINITIONS
 
@@ -119,12 +136,20 @@ struct VertexProperty {
 
 using EdgeParticleClustersProperty = property<edge_weight_t, EdgeProperty>;
 using VertexMotherParticleProperty = property<vertex_name_t, VertexProperty>;
-using DecayChain = adjacency_list<listS, vecS, directedS, VertexMotherParticleProperty, EdgeParticleClustersProperty>;
+using DecayChain =
+    adjacency_list<listS, vecS, bidirectionalS, VertexMotherParticleProperty, EdgeParticleClustersProperty>;
 
 class CaloTruthAccumulator : public DigiAccumulatorMixMod {
 public:
   explicit CaloTruthAccumulator(const edm::ParameterSet &config, edm::ProducerBase &mixMod, edm::ConsumesCollector &iC);
 
+  ~CaloTruthAccumulator(){
+      for (auto it = debughistos.begin(); it != debughistos.end(); it++ ){
+          TCanvas cv;
+          it->second.Draw("colz");
+          cv.Print(it->first+".pdf");
+      }
+  }
 private:
   void initializeEvent(const edm::Event &event, const edm::EventSetup &setup) override;
   void accumulate(const edm::Event &event, const edm::EventSetup &setup) override;
@@ -145,6 +170,12 @@ private:
                    std::unordered_map<int, std::map<int, float>> &simTrackDetIdEnergyMap,
                    const T &event,
                    const edm::EventSetup &setup);
+
+  /** @brief Assigns the coordinates of the associated SimTrack. These are wrong until CMSSW Geant stepping has been fixed! */
+  void assignSimClusterCoordinates(std::unique_ptr<SimClusterCollection>& , const std::vector<SimVertex> &,
+          const size_t previous_simclusters);
+  HGCalParticlePropagator prop_;
+  std::map< TString, TH2D>  debughistos;
 
   const std::string messageCategory_;
 
@@ -206,6 +237,9 @@ private:
   calo_particles m_caloParticles;
   // geometry type (0 pre-TDR; 1 TDR)
   int geometryType_;
+  bool saveSimClusterHistory_;
+  hgcal::RecHitTools recHitTools_;
+  std::vector<SimClusterHistory> simClusterHistory_;
 };
 
 /* Graph utility functions */
@@ -288,11 +322,13 @@ namespace {
                              CaloTruthAccumulator::calo_particles &caloParticles,
                              std::unordered_multimap<Barcode_t, Index_t> &simHitBarcodeToIndex,
                              std::unordered_map<int, std::map<int, float>> &simTrackDetIdEnergyMap,
+                             std::vector<SimClusterHistory> &simClusterHistory,
                              Selector selector)
         : output_(output),
           caloParticles_(caloParticles),
           simHitBarcodeToIndex_(simHitBarcodeToIndex),
           simTrackDetIdEnergyMap_(simTrackDetIdEnergyMap),
+          simClusterHistory_(simClusterHistory),
           selector_(selector) {}
     template <typename Vertex, typename Graph>
     void discover_vertex(Vertex u, const Graph &g) {
@@ -316,6 +352,28 @@ namespace {
         for (auto const &hit_and_energy : acc_energy) {
           simcluster.addRecHitAndFraction(hit_and_energy.first, hit_and_energy.second);
         }
+
+        // save parent vertices and their pdgId in the history
+        SimClusterHistory history;
+        std::vector<Vertex> vertexLookup = {u};
+        while (vertexLookup.size() > 0) {
+          Vertex v = vertexLookup[0];
+          vertexLookup.erase(vertexLookup.begin());
+          auto range = in_edges(v, g);
+          for (auto it = range.first; it != range.second; it++) {
+            Vertex w = source(*it, g);
+            auto const vprop = get(vertex_name, g, w);
+            int pdgId = vprop.simTrack ? vprop.simTrack->type() : 0;
+            history.push_back(std::pair<int, int>(w, pdgId));
+            if (w != 0) {
+              vertexLookup.push_back(w);
+            }
+          }
+        }
+        // the vertex discovery is top-down, while the common ancestor lookup is bottom-up,
+        // so reverse the vertices before storing them
+        std::reverse(history.begin(), history.end());
+        simClusterHistory_.push_back(history);
       }
     }
     template <typename Edge, typename Graph>
@@ -350,6 +408,7 @@ namespace {
     CaloTruthAccumulator::calo_particles &caloParticles_;
     std::unordered_multimap<Barcode_t, Index_t> &simHitBarcodeToIndex_;
     std::unordered_map<int, std::map<int, float>> &simTrackDetIdEnergyMap_;
+    std::vector<SimClusterHistory> &simClusterHistory_;
     Selector selector_;
   };
 }  // namespace
@@ -368,11 +427,16 @@ CaloTruthAccumulator::CaloTruthAccumulator(const edm::ParameterSet &config,
       minEnergy_(config.getParameter<double>("MinEnergy")),
       maxPseudoRapidity_(config.getParameter<double>("MaxPseudoRapidity")),
       premixStage1_(config.getParameter<bool>("premixStage1")),
-      geometryType_(-1) {
+      geometryType_(-1),
+      saveSimClusterHistory_(config.getParameter<bool>("saveSimClusterHistory")) {
   mixMod.produces<SimClusterCollection>("MergedCaloTruth");
   mixMod.produces<CaloParticleCollection>("MergedCaloTruth");
   if (premixStage1_) {
     mixMod.produces<std::vector<std::pair<unsigned int, float>>>("MergedCaloTruth");
+  }
+
+  if (saveSimClusterHistory_) {
+    mixMod.produces<std::vector<SimClusterHistory>>("MergedCaloTruth");
   }
 
   iC.consumes<std::vector<SimTrack>>(simTrackLabel_);
@@ -393,6 +457,10 @@ CaloTruthAccumulator::CaloTruthAccumulator(const edm::ParameterSet &config,
   for (auto const &collectionTag : collectionTags_) {
     iC.consumes<std::vector<PCaloHit>>(collectionTag);
   }
+
+  debughistos["misass_vs_energy"] = TH2D("misass_vs_energy","misass_vs_energy",15, 0, 20, 30, 0, 1);
+  debughistos["misass_vs_eta"]    = TH2D("misass_vs_eta","misass_vs_eta",15, 1.5, 3, 30, 0, 1);
+
 }
 
 void CaloTruthAccumulator::beginLuminosityBlock(edm::LuminosityBlock const &iLumiBlock, const edm::EventSetup &iSetup) {
@@ -433,8 +501,11 @@ void CaloTruthAccumulator::beginLuminosityBlock(edm::LuminosityBlock const &iLum
 void CaloTruthAccumulator::initializeEvent(edm::Event const &event, edm::EventSetup const &setup) {
   output_.pSimClusters.reset(new SimClusterCollection());
   output_.pCaloParticles.reset(new CaloParticleCollection());
+  simClusterHistory_.clear();
 
   m_detIdToTotalSimEnergy.clear();
+  prop_.setEventSetup(setup);
+  recHitTools_.getEventSetup(setup);
 }
 
 /** Create handle to edm::HepMCProduct here because event.getByLabel with
@@ -499,6 +570,12 @@ void CaloTruthAccumulator::finalizeEvent(edm::Event &event, edm::EventSetup cons
     }
   }
 
+  // save SimCluster history
+  if (saveSimClusterHistory_) {
+    std::unique_ptr<std::vector<SimClusterHistory>> simClusterHistory = std::make_unique<std::vector<SimClusterHistory>>(simClusterHistory_);
+    event.put(std::move(simClusterHistory), "MergedCaloTruth");
+  }
+
   // save the SimCluster orphan handle so we can fill the calo particles
   auto scHandle = event.put(std::move(output_.pSimClusters), "MergedCaloTruth");
 
@@ -517,6 +594,10 @@ void CaloTruthAccumulator::finalizeEvent(edm::Event &event, edm::EventSetup cons
 
   std::unordered_map<Index_t, float>().swap(m_detIdToTotalSimEnergy);
   std::unordered_multimap<Barcode_t, Index_t>().swap(m_simHitBarcodeToIndex);
+
+
+
+
 }
 
 template <class T>
@@ -635,6 +716,7 @@ void CaloTruthAccumulator::accumulateEvent(const T &event,
       put(vertexMothersProp, v.vertexId(), VertexProperty(&tracks[trackid_to_track_index[v.parentIndex()]], 0));
     }
   }
+  int previous_simclusters=output_.pSimClusters->size();//already added ones
   SimHitsAccumulator_dfs_visitor vis;
   depth_first_search(decay, visitor(vis));
   CaloParticle_dfs_visitor caloParticleCreator(
@@ -642,6 +724,7 @@ void CaloTruthAccumulator::accumulateEvent(const T &event,
       m_caloParticles,
       m_simHitBarcodeToIndex,
       simTrackDetIdEnergyMap,
+      simClusterHistory_,
       [&](EdgeProperty &edge_property) -> bool {
         // Apply selection on SimTracks in order to promote them to be
         // CaloParticles. The function returns TRUE if the particle satisfies
@@ -652,6 +735,8 @@ void CaloTruthAccumulator::accumulateEvent(const T &event,
                 std::abs(edge_property.simTrack->momentum().Eta()) < maxPseudoRapidity_);
       });
   depth_first_search(decay, visitor(caloParticleCreator));
+
+  assignSimClusterCoordinates(output_.pSimClusters , vertices, previous_simclusters);
 
 #if DEBUG
   boost::write_graphviz(std::cout,
@@ -704,6 +789,123 @@ void CaloTruthAccumulator::fillSimHits(std::vector<std::pair<DetId, const PCaloH
     }
   }  // end of loop over InputTags
 }
+
+void CaloTruthAccumulator::assignSimClusterCoordinates(std::unique_ptr<SimClusterCollection>& scs,
+        const std::vector<SimVertex> & vs, const size_t previous_simclusters){
+
+std::cout << "popagate" << std::endl;
+    int misassigned = 0;
+    int totalhgcalinthisround = 0;
+    int novertex = 0;
+    for(size_t isc = previous_simclusters; isc < scs->size(); isc++){
+        auto & sc = scs->at(isc);
+
+//std::cout << isc << std::endl;
+        /////////////////////////// Mostly for debugging
+        //get position
+        int layer = 4000;
+        double lowestz=4000.;
+        for(const auto& hitsAndEnergies: sc.hits_and_fractions()){
+            auto detid = hitsAndEnergies.first;
+            int thislayer = recHitTools_.getLayer(detid);
+            double thisz = fabs(recHitTools_.getPosition(detid).z());
+            if(lowestz>thisz){
+                lowestz = thisz;
+            }
+            if(layer>thislayer){
+                layer = thislayer;
+            }
+        }
+        //assign position to first layer hit
+        math::XYZVectorF thispos(0,0,0);
+        float toten=0;
+        int nhits=0;
+        //these are still energies in the accumulation step
+        for(const auto& hitsAndEnergies: sc.hits_and_fractions()){
+            auto detid = hitsAndEnergies.first;
+            auto energy = hitsAndEnergies.second; //not precise but good enough for weighting
+            int thislayer = recHitTools_.getLayer(detid);
+            float thisz = fabs(recHitTools_.getPosition(detid).z());
+            if(fabs(thisz - lowestz) < 0.3 ){//thislayer == layer){
+                auto ipos = recHitTools_.getPosition(detid).basicVector();
+                thispos += math::XYZVectorF(ipos.x(),ipos.y(),ipos.z()) * energy;
+                toten+=energy;
+                nhits++;
+            }
+        }
+        thispos/=toten;
+
+
+
+        // std::cout << thispos <<" "<< thispos.eta() <<std::endl;
+
+        if(fabs(thispos.z())>prop_.getHGCalZ()){//inside
+            math::XYZTLorentzVectorF insidepos(thispos.x(),thispos.y(),thispos.z(),0);
+            sc.setImpactPoint(insidepos);
+            sc.setImpactMomentum(sc.p4());
+        }
+
+        if(sc.g4Tracks().size()){
+            bool try_propagation=false;
+            const auto& t = sc.g4Tracks().at(0);
+            const auto  mom = t.momentum();
+            math::XYZTLorentzVectorF momentum(mom.x(),mom.y(),mom.z(),mom.t());
+            math::XYZTLorentzVectorF vertex(0,0,10000,0);
+            if(t.vertIndex() >= (int)vs.size() || t.vertIndex() < 0){
+                edm::LogWarning("CaloTruthAccumulator") << "no vertex associated to g4Track or vertex could not be found.";
+            }
+            else{
+                const auto& pos = vs.at(t.vertIndex()).position();
+                vertex = math::XYZTLorentzVectorF(pos.x(),pos.y(),pos.z(),pos.t());
+                try_propagation = true;
+            }
+            sc.setImpactPoint(vertex);
+            sc.setImpactMomentum(momentum);
+
+            if(try_propagation){
+                auto oldvert = vertex;
+                prop_.propagate(vertex,momentum,t.charge());
+
+                if(fabs(vertex.eta()) > 1.5 && fabs(vertex.eta()) < 3.){
+                    /*
+                    std::cout << sc << std::endl;
+                    std::cout << "momentum.p" << std::sqrt(momentum.Vect().Mag2()) << std::endl;
+                    std::cout << "orig (eta,phi,z,t) "<< oldvert.eta()
+                                << " " <<oldvert.phi()<< " "  << oldvert.z()<< " "<< oldvert.T()<< " "   << std::endl;
+                    std::cout << "prop (eta,phi,z,t) "<< vertex.eta()
+                                << " " <<vertex.phi()<< " "  << vertex.z()<< " "<< vertex.T()<< " "   << std::endl;
+                    std::cout << "hitpos (eta,phi,z,t) "<< thispos.eta()
+                                << " " <<thispos.phi()<< " "  << thispos.z()<<  " "   << std::endl;
+                                */
+                    totalhgcalinthisround++;
+                    double error = reco::deltaR(oldvert.eta(), oldvert.phi(), vertex.eta(),vertex.phi() );
+                    if(error > 0.04)
+                        misassigned++;
+
+                    debughistos["misass_vs_energy"].Fill(momentum.E(), error);
+                    debughistos["misass_vs_eta"].Fill(momentum.Eta(), error);
+
+                    vertex = math::XYZTLorentzVectorF(thispos.x(),thispos.y(),thispos.z(),vertex.t());
+                    sc.setImpactPoint(vertex);
+                    sc.setImpactMomentum(momentum);
+                }
+            }
+            else if(fabs(thispos.eta()) > 1.5 && fabs(thispos.eta()) < 3.){
+                totalhgcalinthisround++;
+            }
+
+
+        }
+        else{
+            throw cms::Exception("Simcluster without genParticle or G4track");
+        }
+    }
+
+    std::cout << "misassigned " << misassigned << " of " << totalhgcalinthisround << std::endl;
+    std::cout << "novertex    " << novertex << " of " << totalhgcalinthisround << std::endl;
+
+}
+
 
 // Register with the framework
 DEFINE_DIGI_ACCUMULATOR(CaloTruthAccumulator);
