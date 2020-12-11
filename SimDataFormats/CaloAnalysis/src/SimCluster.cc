@@ -17,8 +17,9 @@ SimCluster::SimCluster(const SimTrack &simtrk) {
   event_ = simtrk.eventId();
   particleId_ = simtrk.trackId();
 
-  theMomentum_.SetPxPyPzE(
+  surfaceMomentum_.SetPxPyPzE(
       simtrk.momentum().px(), simtrk.momentum().py(), simtrk.momentum().pz(), simtrk.momentum().E());
+  pdgId_ = simtrk.type();
 }
 
 SimCluster::SimCluster(EncodedEventId eventID, uint32_t particleID) {

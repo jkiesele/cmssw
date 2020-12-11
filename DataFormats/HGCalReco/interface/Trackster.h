@@ -11,6 +11,8 @@
 
 #include <Eigen/Core>
 
+#define TICLTRACKSTER_N_PARTICLETYPES 8
+
 // A Trackster is a Direct Acyclic Graph created when
 // pattern recognition algorithms connect hits or
 // layer clusters together in a 3D object.
@@ -142,6 +144,21 @@ namespace ticl {
       return id_probabilities_[(int)type];
     }
 
+    static inline ParticleType pdgIdToType(int pdgId) {
+        if (abs(pdgId) == 22)
+            return Trackster::ParticleType::photon;
+        if (abs(pdgId) == 11)
+            return Trackster::ParticleType::electron;
+        if (abs(pdgId) == 13)
+            return Trackster::ParticleType::muon;
+        if (abs(pdgId) == 111) //can be extended!
+            return Trackster::ParticleType::neutral_hadron;
+        if (pdgId == 0)
+            return Trackster::ParticleType::ambiguous;
+        else
+            return Trackster::ParticleType::unknown;
+    }
+
   private:
     // The vertices of the DAG are the indices of the
     // 2d objects in the global collection
@@ -190,7 +207,7 @@ namespace ticl {
     std::array<float, 3> sigmasPCA_;
 
     // trackster ID probabilities
-    std::array<float, 8> id_probabilities_;
+    std::array<float, TICLTRACKSTER_N_PARTICLETYPES> id_probabilities_;
   };
 }  // namespace ticl
 #endif

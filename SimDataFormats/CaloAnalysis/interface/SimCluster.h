@@ -9,7 +9,7 @@
 #include "SimDataFormats/Track/interface/SimTrack.h"
 #include <vector>
 
-//
+//a
 // Forward declarations
 //
 class SimTrack;
@@ -50,13 +50,9 @@ public:
 
   /** @brief PDG ID.
    *
-   * Returns the PDG ID of the first associated gen particle. If there are no
-   * gen particles associated then it returns type() from the first SimTrack. */
+   * Returns the PDG ID of the SimCluster */
   int pdgId() const {
-    if (genParticles_.empty())
-      return g4Tracks_[0].type();
-    else
-      return (*genParticles_.begin())->pdgId();
+      return pdgId_;
   }
 
   /** @brief Signal source, crossing number.
@@ -88,7 +84,7 @@ public:
 
   /// @brief Four-momentum Lorentz vector. Note this is taken from the first
   /// SimTrack only.
-  const math::XYZTLorentzVectorF &p4() const { return theMomentum_; }
+  const math::XYZTLorentzVectorF &p4() const { return surfaceMomentum_; }
 
   /// @brief spatial momentum vector
   math::XYZVectorF momentum() const { return p4().Vect(); }
@@ -177,6 +173,19 @@ public:
     fractions_.emplace_back(fraction);
   }
 
+  /** @brief Same as addRecHitAndFraction but when the hit is already registered, the fraction
+   * is increased. */
+  void addDuplicateRecHitAndFraction(uint32_t hit, float fraction) {
+      std::vector<uint32_t>::iterator it = std::find(hits_.begin(), hits_.end(), hit);
+      if (it == hits_.end()) {
+          // not added yet
+          addRecHitAndFraction(hit, fraction);
+      } else {
+          int i = std::distance(hits_.begin(), it);
+          fractions_[i] += fraction;
+      }
+  }
+
   /** @brief add rechit energy */
   void addHitEnergy(float energy) { energies_.emplace_back(energy); }
 
@@ -215,6 +224,23 @@ public:
   /** @brief add simhit's energy to cluster */
   void addSimHit(const PCaloHit &hit) { simhit_energy_ += hit.energy(); }
 
+  const math::XYZTLorentzVectorF& caloSurfacePosition() const {
+      return surfacePosition_;
+  }
+  const math::XYZTLorentzVectorF& caloSurfaceMomentum() const {
+      return surfaceMomentum_;
+  }
+
+  void setPdgId(const int &pid) {
+      pdgId_=pid;
+  }
+  void setCaloSurfacePosition(const math::XYZTLorentzVectorF &v)  {
+      surfacePosition_ = v;
+  }
+  void setCaloSurfaceMomentum(const math::XYZTLorentzVectorF &v)  {
+      surfaceMomentum_ = v;
+  }
+
 private:
   uint64_t nsimhits_;
   EncodedEventId event_;
@@ -225,11 +251,20 @@ private:
   std::vector<float> fractions_;
   std::vector<float> energies_;
 
-  math::XYZTLorentzVectorF theMomentum_;
+  // the class logic is slightly broken. Some properties are just taken from the first (and only)
+  // simtrack, some are members of the simcluster itself. the following is an attempt to start cleaning up
+  // into the direction of the simcluster having its own properties, but being linked to the simtracks that gave
+  // rise to it, e.g. through merging algorithms, taking into account the detector granularity.
+  // float is sufficient here.
+
+  math::XYZTLorentzVectorF surfaceMomentum_;
+  math::XYZTLorentzVectorF surfacePosition_;
+  int pdgId_;
 
   /// references to G4 and reco::GenParticle tracks
   std::vector<SimTrack> g4Tracks_;
   reco::GenParticleRefVector genParticles_;
+
 };
 
 #endif  // SimDataFormats_SimCluster_H
