@@ -3,6 +3,10 @@
 #include "DataFormats/HepMCCandidate/interface/GenParticle.h"
 
 #include "FWCore/MessageLogger/interface/MessageLogger.h"
+#include "DataFormats/DetId/interface/DetId.h"
+#include "DataFormats/ForwardDetId/interface/ForwardSubdetector.h"
+#include "DataFormats/ForwardDetId/interface/HFNoseDetId.h"
+#include "DataFormats/HcalDetId/interface/HcalDetId.h"
 
 #include <numeric>
 
@@ -54,6 +58,75 @@ SimCluster::SimCluster(const std::vector<SimTrack> &simtrks, int pdgId) {
   }
 
   pdgId_ = pdgId;
+}
+
+math::XYZTLorentzVectorF SimCluster::impactMomentumMuOnly() const {
+	math::XYZTLorentzVectorF mom;
+	for (auto& t : g4Tracks_) {
+		if (std::abs(t.type()) == 13)
+			mom += t.getMomentumAtBoundary();
+	}
+	return mom;
+}
+
+math::XYZTLorentzVectorF SimCluster::impactMomentumNoMu() const {
+	math::XYZTLorentzVectorF mom;
+	for (auto& t : g4Tracks_) {
+		if (std::abs(t.type()) != 13)
+			mom += t.getMomentumAtBoundary();
+	}
+	return mom;
+}
+
+SimCluster SimCluster::operator+(const SimCluster& toAdd) {
+	SimCluster orig = *this;
+	return orig += toAdd;
+}
+
+SimCluster& SimCluster::operator+=(const SimCluster& toMerge) {
+    for (auto& track : toMerge.g4Tracks())
+        this->addG4Track(track);
+
+    for (auto& hit_and_e : toMerge.hits_and_fractions())
+        this->addDuplicateRecHitAndFraction(hit_and_e.first, hit_and_e.second);
+
+    auto& mergeMom = toMerge.impactMomentum();
+    float sumE = impactMomentum_.energy() + mergeMom.energy();
+    impactPoint_ = (impactPoint_*impactMomentum_.energy() + mergeMom.energy()*toMerge.impactPoint())/sumE;
+
+    this->impactMomentum_ += mergeMom;
+    return *this;
+}
+
+// At least one simHit in the HGCAL
+bool SimCluster::allHitsHGCAL() const {
+    for (const auto& hitsAndEnergies : hits_and_fractions()) {
+        const DetId id = hitsAndEnergies.first;
+        bool forward = id.det() == DetId::HGCalEE
+                || id.det() == DetId::HGCalHSi
+                || id.det() == DetId::HGCalHSc
+                || (id.det() == DetId::Forward && id.subdetId() != static_cast<int>(HFNose))
+                || (id.det() == DetId::Hcal && id.subdetId() == HcalSubdetector::HcalEndcap);
+
+        if(!forward)
+            return false;
+    }
+    return true;
+}
+
+bool SimCluster::hasHGCALHit() const {
+    for (const auto& hitsAndEnergies : hits_and_fractions()) {
+        const DetId id = hitsAndEnergies.first;
+        bool forward = id.det() == DetId::HGCalEE
+                || id.det() == DetId::HGCalHSi
+                || id.det() == DetId::HGCalHSc
+                || (id.det() == DetId::Forward && id.subdetId() != static_cast<int>(HFNose))
+                || (id.det() == DetId::Hcal && id.subdetId() == HcalSubdetector::HcalEndcap);
+
+        if(forward)
+            return true;
+    }
+    return false;
 }
 
 SimCluster::~SimCluster() {}
