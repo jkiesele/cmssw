@@ -267,7 +267,7 @@ class Node {
         Node() : 
             trackid_(0), pdgid_(0), initial_energy_(0.), parent_(nullptr)
             {}
-        Node(const SimTrack& track) {
+        Node(const SimTrack& track,vector<double> merging_threshold_transv,vector<double> merging_threshold_longitud) {
             trackid_ = track.trackId();
             initial_energy_ = track.momentum().E();
             pdgid_ = track.type();
@@ -283,6 +283,8 @@ class Node {
                     track.getPositionAtBoundary().z()
                     );
                 }
+            merging_thresholds_transv_ = merging_threshold_transv; 
+            merging_thresholds_longitud_ = merging_threshold_longitud;
             }
         ~Node() {}
 
@@ -311,11 +313,11 @@ class Node {
             vector<double> cumsum_energies_to_axis = cumsum(apply_argsort(energies, order));
 
             // Find the energy containment radii
-            vector<double> thresholds = { .3, .75, .85 };
+           // vector<double> thresholds = { .3, .75, .85 };
             for (std::size_t i = 0; i < cumsum_energies_to_axis.size()-1; ++i) {
                 double cumsum_this = cumsum_energies_to_axis[i] / total_energy;
                 double cumsum_next = cumsum_energies_to_axis[i+1] / total_energy;
-                for(auto threshold : thresholds){
+                for(auto threshold : merging_thresholds_transv_){
                     if (cumsum_next > threshold && cumsum_this < threshold)
                         // We just crossed a threshold, save the radius
                         energy_containment_radii_[threshold] = d_to_axis[i+1];
@@ -327,12 +329,12 @@ class Node {
             apply_argsort_in_place(d_along_axis, order);
             vector<double> cumsum_energies_along_axis = cumsum(apply_argsort(energies, order));
 
-            thresholds = { .1, .9 };
+          //  thresholds = { .1, .9 };
             // Find the longitudinal energy containment quantiles
             for (std::size_t i = 0; i < cumsum_energies_along_axis.size()-1; ++i) {
                 double cumsum_this = cumsum_energies_along_axis[i] / total_energy;
                 double cumsum_next = cumsum_energies_along_axis[i+1] / total_energy;
-                for(auto threshold : thresholds){
+                for(auto threshold : merging_thresholds_longitud_){
                     if (cumsum_next > threshold && cumsum_this < threshold){
                         // We just crossed a threshold, save the radius
                         energy_containment_longitudinally_[threshold] = d_along_axis[i+1];
@@ -526,6 +528,7 @@ class Node {
             for(auto hit : hits_) hit->z_ *= -1.;
             }
 
+
         bool crossed_boundary_, is_hadron_;
         int trackid_, pdgid_;
         double initial_energy_, final_z_;
@@ -539,6 +542,8 @@ class Node {
         vector<Node*> children_;
         vector<int> merged_trackids_;
         vector<Hit*> hits_;
+
+        vector<double>  merging_thresholds_transv_, merging_thresholds_longitud_;            
     };
 
 /* Finds a track by trackid in a tree */
@@ -582,12 +587,14 @@ b1-----------------e1
      b2-----e2
      <---------------
 */
-double longitudinal_distance(Node& t1, Node& t2){
+double longitudinal_distance(Node& t1, Node& t2,vector<double> longitudinal_containment){
     // Vectors of the 10% and 90% longitudinal energy quantiles
-    Vector3D v1_10 = t1.boundary_position_ + t1.energy_containment_longitudinally_[.1] * t1.axis_;
-    Vector3D v1_90 = t1.boundary_position_ + t1.energy_containment_longitudinally_[.9] * t1.axis_;
-    Vector3D v2_10 = t2.boundary_position_ + t2.energy_containment_longitudinally_[.1] * t2.axis_;
-    Vector3D v2_90 = t2.boundary_position_ + t2.energy_containment_longitudinally_[.9] * t2.axis_;
+    double lower_quantile = longitudinal_containment[0];
+    double upper_quantile = longitudinal_containment[1];
+    Vector3D v1_10 = t1.boundary_position_ + t1.energy_containment_longitudinally_[lower_quantile] * t1.axis_;
+    Vector3D v1_90 = t1.boundary_position_ + t1.energy_containment_longitudinally_[upper_quantile] * t1.axis_;
+    Vector3D v2_10 = t2.boundary_position_ + t2.energy_containment_longitudinally_[lower_quantile] * t2.axis_;
+    Vector3D v2_90 = t2.boundary_position_ + t2.energy_containment_longitudinally_[upper_quantile] * t2.axis_;
     // Rotate them
     Vector3D origin = t1.boundary_position_;
     Vector3D rb1 = t1.rotation_.dot(v1_10 - origin);
@@ -677,11 +684,14 @@ double polygon_overlap(vector<Vector3D>& polygon1, vector<Vector3D>& polygon2, i
     }
 
 pair<double, double> calculate_shower_overlap(Node& t1, Node& t2){
+    //reading energy containment thresholds : t1 and t2 both have the same thresholds of course, so it's irrelevant from which node to read them
+    vector<double> transverse_containment = t1.merging_thresholds_transv_;
+    vector<double> longitudinal_containment = t1.merging_thresholds_longitud_ ;     
     if (t1.boundary_momentum_.E() < t2.boundary_momentum_.E()) std::swap(t1,t2);
     double f_radius;
-    if(t1.is_hadron_ != t2.is_hadron_) f_radius = .3;
-    else if (t1.is_hadron_ && t2.is_hadron_) f_radius = .75;
-    else f_radius = .85;
+    if(t1.is_hadron_ != t2.is_hadron_) f_radius = transverse_containment[0];
+    else if (t1.is_hadron_ && t2.is_hadron_) f_radius = transverse_containment[1];
+    else f_radius = transverse_containment[2];
     double t1_r = std::max(t1.energy_containment_radii_[f_radius], 1.0);
     double t2_r = std::max(t2.energy_containment_radii_[f_radius], 1.0);
 
@@ -699,7 +709,7 @@ pair<double, double> calculate_shower_overlap(Node& t1, Node& t2){
         t2.inv_rotation_.dot(get_circle(t2_r)) + t2_e - t1_b
         );
     double rcircle_overlap = polygon_overlap(t1_rcircle, t2_rcircle);
-    double deltaz = longitudinal_distance(t1, t2);
+    double deltaz = longitudinal_distance(t1, t2, longitudinal_containment);
     return std::make_pair(rcircle_overlap, deltaz);
     }
 
@@ -1042,6 +1052,7 @@ class simmerger : public edm::stream::EDProducer<> {
         edm::EDGetTokenT<SimClusterCollection> simClustersToken_;
         edm::EDGetTokenT<edm::Association<SimClusterCollection>> simTrackToSimClusterToken_;
         unordered_map<unsigned int, SimTrackRef> trackIdToTrackRef_;
+        vector<double> mergeThresholdsTransv_,mergeThresholdsLongitud_;
     };
 
 
@@ -1052,7 +1063,9 @@ simmerger::simmerger(const edm::ParameterSet& iConfig) :
     tokenSimTracks(consumes<edm::SimTrackContainer>(edm::InputTag("g4SimHits"))),
     tokenSimVertices(consumes<edm::SimVertexContainer>(edm::InputTag("g4SimHits"))),
     simClustersToken_(consumes<SimClusterCollection>(edm::InputTag("mix:MergedCaloTruth"))),
-    simTrackToSimClusterToken_(consumes<edm::Association<SimClusterCollection>>(edm::InputTag("mix:simTrackToSimCluster")))
+    simTrackToSimClusterToken_(consumes<edm::Association<SimClusterCollection>>(edm::InputTag("mix:simTrackToSimCluster"))),
+    mergeThresholdsTransv_(iConfig.getParameter<vector<double > > ( "MergeTheresholdsTransv" )),
+    mergeThresholdsLongitud_(iConfig.getParameter<vector<double > > ( "MergeTheresholdsLongitud" ))
     {
     produces<SimClusterCollection>();
     produces<edm::Association<SimClusterCollection>>();
@@ -1110,7 +1123,7 @@ void simmerger::produce(edm::Event& iEvent, const edm::EventSetup& iSetup) {
     unordered_map<int, Node> trackid_to_node;
     for(size_t i = 0; i < handleSimTracks->size(); i++){
         SimTrackRef track(handleSimTracks, i);
-        trackid_to_node.emplace(track->trackId(), Node(*track));
+        trackid_to_node.emplace(track->trackId(), Node(*track, mergeThresholdsTransv_,mergeThresholdsLongitud_));
         trackIdToTrackRef_[track->trackId()] = track;
 	}
 
