@@ -47,8 +47,8 @@ simClusterToCaloPartTable = cms.EDProducer("SimClusterToCaloParticleIndexTablePr
 )
 
 hgcSimTruth = cms.EDProducer("simmerger",
-                           MergeTheresholdsTransv = cms.vdouble(0.3,0.95,0.85), #(.3, .75, .85),
-                           MergeTheresholdsLongitud = cms.vdouble(0.05,0.95)  #(.1, .9)
+                           MergeTheresholdsTransv = cms.vdouble(0.3,0.75,0.85), #(.3, .75, .85),
+                           MergeTheresholdsLongitud = cms.vdouble(0.1,0.9)  #(.1, .9)
                            )
 hgcSimTruthDR = cms.EDProducer("HGCTruthProducer")
 
