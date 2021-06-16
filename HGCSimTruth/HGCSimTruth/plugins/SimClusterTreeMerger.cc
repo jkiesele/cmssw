@@ -158,8 +158,8 @@ std::ostream& operator<<(std::ostream& os, const RotMat3D& m){
 
 
 struct Hit {
-    Hit(double x, double y, double z, double t, double energy, int trackid) :
-        x_(x), y_(y), z_(z), t_(t), energy_(energy), trackid_(trackid) {}
+    Hit(double x, double y, double z, double t, double energy, int trackid, int layer) :
+        x_(x), y_(y), z_(z), t_(t), energy_(energy), trackid_(trackid),layer_(layer) {}
     ~Hit() {}
     double x_;
     double y_;
@@ -167,6 +167,7 @@ struct Hit {
     double t_;
     double energy_;
     int trackid_;
+    int layer_;
     GlobalPoint gpoint(){return GlobalPoint(x_, y_, z_);}
     Vector3D vector3d(){return Vector3D(x_, y_, z_);}
     };
@@ -285,6 +286,7 @@ class Node {
                 }
             merging_thresholds_transv_ = merging_threshold_transv; 
             merging_thresholds_longitud_ = merging_threshold_longitud;
+            parent_=0;
             }
         ~Node() {}
 
@@ -293,6 +295,23 @@ class Node {
             if (nhits() == 0) return;
             centroid_ = ::hitcentroid(hits_);
             axis_ = (centroid_-boundary_position_) / (centroid_-boundary_position_).norm();
+
+            //DIRTY HACKS HERE
+            auto hitcp = hits_;
+            //find lower layer number
+            int minlayer=100;
+            for(const auto h:hits_){
+                if(h->layer_<minlayer)
+                    minlayer = h->layer_;
+            }
+            //now select only the first 5 layers
+            vector<Hit*> newhits;
+            for(const auto h:hits_){
+                if(h->layer_<minlayer+5){
+                    newhits.push_back(h);
+                }
+            }
+            hits_=newhits;
 
             // Compute the transverse distances from hits to the shower axis
             vector<double> d_to_axis;
@@ -341,6 +360,9 @@ class Node {
                         }
                     }
                 }
+
+            //DIRTY HACK revert
+            hits_=hitcp;//reset back
 
             // Build rotation matrix for this shower axis
             // R.dot(v) will rotate v to a coordinate system where the z-axis
@@ -1107,7 +1129,8 @@ void simmerger::produce(edm::Event& iEvent, const edm::EventSetup& iSetup) {
             GlobalPoint position = hgcalRecHitToolInstance_.getPosition(id);
             hits.push_back(Hit(
                 position.x(), position.y(), position.z(),
-                hit->time(), hit->energy(), hit->geantTrackId()
+                hit->time(), hit->energy(), hit->geantTrackId(),
+                hgcalRecHitToolInstance_.getLayer(id)
                 ));
             trackids_with_hits.insert(hit->geantTrackId());
             }
