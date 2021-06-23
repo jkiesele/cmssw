@@ -22,15 +22,3 @@ void PFTruthParticle::setSimClusters(const SimClusterRefVector& refs) { simClust
 void PFTruthParticle::addSimCluster(const SimClusterRef& sc) { simClusters_.push_back(sc); }
 
 void PFTruthParticle::addTrackingParticle(const TrackingParticleRef& tp) { trackingParticles_.push_back(tp); }
-
-void PFTruthParticle::addGenParticle(const reco::GenParticleRef& gp) { genParticles_.push_back(gp); }
-
-void PFTruthParticle::addG4Track(const SimTrack& t) { g4Tracks_.push_back(t); }
-
-PFTruthParticle::genp_iterator PFTruthParticle::genParticle_begin() const { return genParticles_.begin(); }
-
-PFTruthParticle::genp_iterator PFTruthParticle::genParticle_end() const { return genParticles_.end(); }
-
-PFTruthParticle::g4t_iterator PFTruthParticle::g4Track_begin() const { return g4Tracks_.begin(); }
-
-PFTruthParticle::g4t_iterator PFTruthParticle::g4Track_end() const { return g4Tracks_.end(); }
