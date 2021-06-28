@@ -45,10 +45,19 @@ using std::pair;
 #include <cstddef>  // For std::ptrdiff_t
 
 
+//DIRTY PLOTTING - REMOVE LATER
+#include "TCanvas.h"
+#include "TH1F.h"
+#include "TH2D.h"
+#include "TEllipse.h"
+#include <cmath>
+//END DIRTY PLOTTING
+
 #define EDM_ML_DEBUG
 #define PI 3.14159265358979323846
 
 #define MINOVERLAP 0.3
+#define MINCIRCLERADIUS 1.
 
 typedef edm::AssociationMap<edm::OneToManyWithQualityGeneric<
     SimClusterCollection, SimClusterCollection, float>> SimClusterToSimClusters;
@@ -160,8 +169,9 @@ std::ostream& operator<<(std::ostream& os, const RotMat3D& m){
 
 
 struct Hit {
-    Hit(double x, double y, double z, double t, double energy, int trackid, int layer) :
-        x_(x), y_(y), z_(z), t_(t), energy_(energy), trackid_(trackid),layer_(layer) {}
+    Hit(double x, double y, double z, double t, double energy, int trackid, int layer, float radius, bool issilicon) :
+        x_(x), y_(y), z_(z), t_(t), energy_(energy), trackid_(trackid),layer_(layer),radius_(radius),
+        issilicon_(issilicon){}
     ~Hit() {}
     double x_;
     double y_;
@@ -172,6 +182,8 @@ struct Hit {
     int layer_;
     GlobalPoint gpoint(){return GlobalPoint(x_, y_, z_);}
     Vector3D vector3d(){return Vector3D(x_, y_, z_);}
+    float radius_;
+    bool issilicon_;
     };
 
 /* Computes the 'average' position of a list of hits */
@@ -280,65 +292,65 @@ class Node {
             crossed_boundary_ = track.crossedBoundary();
             if (crossed_boundary_){
                 boundary_momentum_ = track.getMomentumAtBoundary();
-                boundary_positions_.push_back( Vector3D(
+                boundary_position_ = Vector3D(
                     track.getPositionAtBoundary().x(),
                     track.getPositionAtBoundary().y(),
                     track.getPositionAtBoundary().z()
-                    ));
+                    );
+                boundary_time_ = track.getPositionAtBoundary().t();
+                centroid_=boundary_position_;
                 }
-            merging_thresholds_transv_ = merging_threshold_transv; 
-            merging_thresholds_longitud_ = merging_threshold_longitud;
             parent_=0;
+            circle_radius_=0.1;
+            hadhits_=false;
+            isdense_=false;
             }
         ~Node() {}
 
         /* Number of quantities that depend on the hits */
         void calculate_shower_variables(){
             if (nhits() == 0) return;
-            if(centroids_.size()
-            ||       axes_.size() ||   energy_containment_radiivec_.size() ||
-            energy_containment_longitudinallyvec_.size()
-            ||rotations_.size() || inv_rotations_.size()
 
-            ){
-                //some sanity checks mostly for dev purposes
-                throw std::runtime_error("calculate_shower_variables: should only be run once");//make this edm
+            if(!isLeaf()){
+               // circle_radius_=0;
+               // std::cout << "calculating shower variables for non leaf node?" << std::endl;//DEBUG
+               // return;
             }
-            centroids_.push_back( ::hitcentroid(hits_));
-            auto & boundary_position_ = boundary_positions_.at(0);
-            auto & centroid_ = centroids_.at(0);
-
-            axes_.push_back((centroid_-boundary_position_) / (centroid_-boundary_position_).norm());
-            auto& axis_ = axes_.at(0);
-
-            energy_containment_radiivec_.push_back(std::map<double,double>());
-            auto & energy_containment_radii_ = energy_containment_radiivec_.at(0);
-
-            energy_containment_longitudinallyvec_.push_back(std::map<double,double>());
-            auto & energy_containment_longitudinally_ = energy_containment_longitudinallyvec_.at(0);
-
-            rotations_.push_back(RotMat3D());
-            auto & rotation_ = rotations_.at(0);
-
-            inv_rotations_.push_back(RotMat3D());
-            auto & inv_rotation_ = inv_rotations_.at(0);
-
             //DIRTY HACKS HERE
             auto hitcp = hits_;
             //find lower layer number
             int minlayer=100;
+            double highestenergy=0;
             for(const auto h:hits_){
+                if(h->energy_>highestenergy)
+                    highestenergy=h->energy_;
+            }
+            double energycut = std::min(0.00005, highestenergy);
+            for(const auto h:hits_){
+                if(h->energy_ < energycut)
+                    continue;
                 if(h->layer_<minlayer)
                     minlayer = h->layer_;
             }
             //now select only the first 5 layers
             vector<Hit*> newhits;
             for(const auto h:hits_){
-                if(h->layer_<minlayer+5){
+                if(h->layer_<minlayer+1){
                     newhits.push_back(h);
                 }
             }
             hits_=newhits;
+
+            if(hits_.size()<7)
+                return;
+
+            centroid_ = ( ::hitcentroid(hits_));
+
+            //is it the axis? this only works for straight lines..
+            //pca like would be useful here FIXME
+            //but maybe taking this as first approx, and then calculate correction rather than full PCA?
+            auto axis_  = ((centroid_-boundary_position_) / (centroid_-boundary_position_).norm());
+
 
             // Compute the transverse distances from hits to the shower axis
             vector<double> d_to_axis;
@@ -349,67 +361,44 @@ class Node {
                 Vector3D hit_pos = hit->vector3d() - boundary_position_;
                 Vector3D projection_along_axis = hit_pos.dot(axis_) * axis_;
                 d_along_axis.push_back(projection_along_axis.norm());
-                d_to_axis.push_back((hit_pos - projection_along_axis).norm());
+                //NEW!!
+                //DIRTY HACK FIXME just for testing DEBUG
+                double thisd= 2.*hit->radius_ + (hit_pos - projection_along_axis).norm();
+                d_to_axis.push_back(thisd);
+                //notice 2* radius gets added, and is therefore kind of a lower limit
                 energies.push_back(hit->energy_);
                 total_energy += hit->energy_;
-                }
+            }
 
             vector<std::size_t> order = argsort(d_to_axis);
             apply_argsort_in_place(d_to_axis, order);
             vector<double> cumsum_energies_to_axis = cumsum(apply_argsort(energies, order));
+            auto ordered_hits = apply_argsort(hits_, order);
 
             // Find the energy containment radii
-           // vector<double> thresholds = { .3, .75, .85 };
+            // vector<double> thresholds = { .3, .75, .85 };
+
+            //FIXME, we need to actually use the right radii here!
+            //but shouldn't change the execution time a lot
+
+            isdense_=false;
             for (std::size_t i = 0; i < cumsum_energies_to_axis.size()-1; ++i) {
                 double cumsum_this = cumsum_energies_to_axis[i] / total_energy;
                 double cumsum_next = cumsum_energies_to_axis[i+1] / total_energy;
-                for(auto threshold : merging_thresholds_transv_){
-                    if (cumsum_next > threshold && cumsum_this < threshold)
-                        // We just crossed a threshold, save the radius
-                        energy_containment_radii_[threshold] = d_to_axis[i+1];
-                    }
+                double threshold = 0.1;//scale later
+                circle_radius_ = d_to_axis[i+1];//DEBUG
+                if(d_to_axis[i] < 5.*ordered_hits[i]->radius_){//is there any sort of dense core?
+                    isdense_=true;
                 }
+                if (cumsum_next > threshold)
+                    break;
 
-            // Same thing, now longitudinally instead of transverse
-            order = argsort(d_along_axis);
-            apply_argsort_in_place(d_along_axis, order);
-            vector<double> cumsum_energies_along_axis = cumsum(apply_argsort(energies, order));
-
-          //  thresholds = { .1, .9 };
-            // Find the longitudinal energy containment quantiles
-            for (std::size_t i = 0; i < cumsum_energies_along_axis.size()-1; ++i) {
-                double cumsum_this = cumsum_energies_along_axis[i] / total_energy;
-                double cumsum_next = cumsum_energies_along_axis[i+1] / total_energy;
-                for(auto threshold : merging_thresholds_longitud_){
-                    if (cumsum_next > threshold && cumsum_this < threshold){
-                        // We just crossed a threshold, save the radius
-                        energy_containment_longitudinally_[threshold] = d_along_axis[i+1];
-                        }
-                    }
-                }
-
-            //DIRTY HACK revert
-            hits_=hitcp;//reset back
-
-            // Build rotation matrix for this shower axis
-            // R.dot(v) will rotate v to a coordinate system where the z-axis
-            // is aligned with the z-axis of `axis`
-            // See https://en.wikipedia.org/wiki/Rotation_matrix#In_three_dimensions
-            double dx = atan2(axis_.y_, axis_.z_);
-            double dy = -asin(axis_.x_ / axis_.norm());
-            rotation_ = RotMat3D(
-                cos(dy), 0., sin(dy),
-                0., 1., 0.,
-                -sin(dy), 0., cos(dy)
-                )
-                .dot(RotMat3D(
-                    1., 0., 0.,
-                    0., cos(dx), -sin(dx),
-                    0., sin(dx), cos(dx)
-                    ));
-
-            inv_rotation_ = rotation_.transpose();
             }
+            if(circle_radius_<MINCIRCLERADIUS)
+                circle_radius_=MINCIRCLERADIUS;//
+
+
+        }
 
         /* Standard depth-first-search tree traversal as an iterator */
         struct Iterator {
@@ -499,9 +488,10 @@ class Node {
 
         void setParent(Node* parent) {parent_ = parent;}
         void addChild(Node* child) {children_.push_back(child);}
-        void addHit(Hit* hit) {hits_.push_back(hit);}
-        int nhits(){ return hits_.size(); }
-        bool hasHits(){ return nhits() > 0; }
+        void addHit(Hit* hit) {hits_.push_back(hit);hadhits_=true;}
+        int nhits()const{ return hits_.size(); }
+        bool hadHits()const{ return hadhits_; }
+        void clearHits(){hits_.clear();}
         bool isLeaf(){ return children_.empty(); }
         bool hasChildren(){ return !(children_.empty()); }
         bool hasParent(){ return parent_ != nullptr; }
@@ -574,25 +564,14 @@ class Node {
         void flipz(){
             final_z_ *= -1.;
             if(crossed_boundary_)
-                for(auto& p : boundary_positions_)
-                    p.z_ *= -1.;
-            for(auto hit : hits_) hit->z_ *= -1.;
-            }
-
-        template<class T>
-        void moveToVector(vector<T> &tomove, vector<T> &toreceive){
-            toreceive.insert(toreceive.end(),tomove.begin(),tomove.end());
-            tomove.clear();
+                boundary_position_.z_ *= -1.;
+            for(auto & h : hits_)
+                h->z_ *= -1;
+        //?    boundary_momentum_.SetPz(-boundary_momentum_.z());
         }
 
+
         void absorbNode(Node *rhs){
-            moveToVector(rhs->centroids_,centroids_);
-            moveToVector(rhs->axes_,axes_);
-            moveToVector(rhs->boundary_positions_,boundary_positions_);
-            moveToVector(rhs->energy_containment_radiivec_,energy_containment_radiivec_);
-            moveToVector(rhs->energy_containment_longitudinallyvec_,energy_containment_longitudinallyvec_);
-            moveToVector(rhs->rotations_,rotations_);
-            moveToVector(rhs->inv_rotations_,inv_rotations_);
 
             for (auto trackid : rhs->merged_trackids_){
                 merged_trackids_.push_back(trackid);
@@ -604,31 +583,39 @@ class Node {
             }
             rhs->children_.clear();
 
-            for(auto hit : rhs->hits_)
-                addHit(hit);
-            rhs->hits_.clear();
+            //non dense nodes can *be* merged but cannot contribute to area after first merge anymore
+            if(!isdense_){
+                circle_radius_=0.1;//set low
+            }
+            if(!rhs->isdense_){
+                rhs->circle_radius_=0.1;
+            }
 
-            // here we could recalculate (by simply adding) the total area made of the sum of circles
-            // if we wanted to go for real IoU to suppress too strong merging
-            // would need another double area member of Node
-
+            hadhits_ |= rhs->hadhits_;
         }
 
         bool crossed_boundary_, is_hadron_;
         int trackid_, pdgid_;
         double initial_energy_, final_z_;
 
+        //use children pointers for all circles etc.
+        //use hits only temporarily, don't store them (second iteration)
+        //that makes:
         math::XYZTLorentzVectorF boundary_momentum_;
-        vector<Vector3D> centroids_, axes_, boundary_positions_;
-        vector<map<double, double> > energy_containment_radiivec_, energy_containment_longitudinallyvec_;
-        vector<RotMat3D> rotations_, inv_rotations_;
+        Vector3D boundary_position_;
+        double boundary_time_;//this could contribute include time
+        double circle_radius_; //just calculate once, using PDGID
 
         Node * parent_;
         vector<Node*> children_;
         vector<int> merged_trackids_;
+        bool hadhits_;
         vector<Hit*> hits_;
+        bool isdense_;
 
-        vector<double>  merging_thresholds_transv_, merging_thresholds_longitud_;            
+        //just for debugging/dev
+        Vector3D centroid_;
+
     };
 
 /* Finds a track by trackid in a tree */
@@ -642,241 +629,83 @@ Node* find_in_tree(Node* root, int trackid){
         << "Track id " << trackid << " is not in the tree";
     }
 
-/* Returns a circle of Vector3D's in the xy plane */
-vector<Vector3D> get_circle(double r, int N=30) {
-    vector<Vector3D> circle(N);
-    for (int i = 0; i < N; ++i) {
-        double angle = 2.*PI * double(i)/double(N-1);
-        circle[i] = Vector3D(r*cos(angle), r*sin(angle), 0.);
+
+double calculate_circle_overlap(const double& d, const double& r1,
+        const double& r2){
+//from https://www.xarg.org/2016/07/calculate-the-intersection-area-of-two-circles/
+    if (d < r1 + r2) {
+
+        double a = r1 * r1;
+        double b = r2 * r2;
+
+        double x = (a - b + d * d) / (2 * d);
+        double z = x * x;
+        double y = sqrt(a - z);
+
+        if (d <= std::abs(r2 - r1)) {
+            return PI * std::min(a, b);
         }
-    return circle;
+        return a * asin(y / r1) + b * asin(y / r2) - y * (x + sqrt(z + b - a));
     }
+    return 0;
+}
+double calculate_shower_overlap(Node* t1, Node* t2){
+    //now overlap with all children here; just one-by-one, not of union
+    //which will be more complicated
 
-/*
-First rotates the 10% and 90% longitudinal energy quantile vectors
-to the reference frame of the most energetic shower (should be t1)
-Then calculates delta z between the end point of the first and 
-the beginning of the second track:
+    //maybe making this an explicit 'root' check plus childred check is better than copying vectors around
+    vector<Node*> nodes_a = t1->children_;
+    nodes_a.push_back(t1);
+    vector<Node*> nodes_b = t2->children_;
+    nodes_b.push_back(t2);
 
-b1------e1
-                b2----------e2
-          ----->
+    double max_overlap=0;
 
+    for(const auto & na: nodes_a){
+        if(!na->circle_radius_)
+            continue;
+        for(const auto& nb: nodes_b){
+            if(!nb->circle_radius_)//non leafs
+                continue;
 
-b1------e1
-     b2----------e2
-     <----
+            //we could reintroduce the cachedOverlap thing here
 
+            //quick check if there can be any overlap
+            auto distvec = na->boundary_position_ - nb->boundary_position_;
+            double distsq = distvec.dot(distvec); //x^2 OPT possible (just take x and y)
+            double rsum = na->circle_radius_+nb->circle_radius_;
 
-b1-----------------e1
-     b2-----e2
-     <---------------
-*/
-double longitudinal_distance(Node& t1, Node& t2,vector<double> longitudinal_containment){
-    // Vectors of the 10% and 90% longitudinal energy quantiles
-
-    //this will give warnings, but leave them as a reminder to fix this function to do something
-    double lower_quantile = longitudinal_containment[0];
-    double upper_quantile = longitudinal_containment[1];
-
-    return 0; //FIXME needs to be adapted to multiple sub-nodes
-    /*
-    Vector3D v1_10 = t1.boundary_position_ + t1.energy_containment_longitudinally_[lower_quantile] * t1.axis_;
-    Vector3D v1_90 = t1.boundary_position_ + t1.energy_containment_longitudinally_[upper_quantile] * t1.axis_;
-    Vector3D v2_10 = t2.boundary_position_ + t2.energy_containment_longitudinally_[lower_quantile] * t2.axis_;
-    Vector3D v2_90 = t2.boundary_position_ + t2.energy_containment_longitudinally_[upper_quantile] * t2.axis_;
-    // Rotate them
-    Vector3D origin = t1.boundary_position_;
-    Vector3D rb1 = t1.rotation_.dot(v1_10 - origin);
-    Vector3D re1 = t1.rotation_.dot(v1_90 - origin);
-    Vector3D rb2 = t1.rotation_.dot(v2_10 - origin);
-    Vector3D re2 = t1.rotation_.dot(v2_90 - origin);
-    // Fix 1 to be the lowest in z after rotating
-    if (rb2.z_ < rb1.z_){ std::swap(rb1, rb2); std::swap(re1, re2); }
-    return rb2.z_ - re1.z_;
-    */
-    }
-
-/*
-Winding number calculation to determine if a point is inside a 2D polygon
-(https://en.wikipedia.org/wiki/Nonzero-rule)
-point: (x, y)
-polygon: [ (x1, y1), ..., (xn, yn) ]
-*/
-bool is_inside(const vector<double>& px, const vector<double>& py, double x, double y){
-    int winding_number = 0;
-    int n_edges = px.size();
-    for (int i_edge = 0; i_edge < n_edges; ++i_edge){
-        int i_edge_next = (i_edge+1) % n_edges; // Loop back for last edge
-        double x1 = px[i_edge], x2 = px[i_edge_next], y1 = py[i_edge], y2 = py[i_edge_next];
-        // Skip any edges completely to the left of x
-        if (x1 < x && x2 < x) continue;
-        // Skip any edges that don't cross the line at y=y
-        if ((y1 < y && y2 < y) || (y1 > y && y2 > y)) continue;
-        if (x1==x2){
-            // Vertical edge - no need to calculate crossing point, slope is also infinite
-            if (x1>x) winding_number++;
-            }
-        else {
-            // Edges that cross the line y=y and are not vertical;
-            // need to calculate crossing point
-            if ( (y - y1) / ((y2-y1)/(x2-x1)) + x1 > x ) winding_number++;
-            }
-        }
-    return winding_number % 2 == 1; // false if even (out), and true if odd (in)
-    }
-
-/* Evaluates the overlap of two 2D polygons numerically */
-double polygon_overlap(
-    const vector<double>& x1, const vector<double>& y1,
-    const vector<double>& x2, const vector<double>& y2,
-    int nbins=50
-    ){
-    // First determine extrema
-    auto x1_minmax = std::minmax_element(x1.begin(), x1.end());
-    auto x2_minmax = std::minmax_element(x2.begin(), x2.end());
-    double xmin = std::min(*(x1_minmax.first), *(x2_minmax.first));
-    double xmax = std::max(*(x1_minmax.second), *(x2_minmax.second));
-    auto y1_minmax = std::minmax_element(y1.begin(), y1.end());
-    auto y2_minmax = std::minmax_element(y2.begin(), y2.end());
-    double ymin = std::min(*(y1_minmax.first), *(y2_minmax.first));
-    double ymax = std::max(*(y1_minmax.second), *(y2_minmax.second));
-    double x_binwidth = (xmax-xmin) / double(nbins);
-    double y_binwidth = (ymax-ymin) / double(nbins);
-
-    // Count how many cells in a grid are inside polygon 2 and in both polygons
-    int is_inside_2 = 0, is_inside_1_and_2 = 0;
-    for (int i = 0; i < nbins; ++i){
-        for (int j = 0; j < nbins; ++j){
-            double x = xmin + i*x_binwidth + .5*x_binwidth;
-            double y = ymin + j*y_binwidth + .5*y_binwidth;
-            if (is_inside(x2, y2, x, y)){
-                is_inside_2++;
-                if (is_inside(x1, y1, x, y)) is_inside_1_and_2++;
-                }
-            }
-        }
-    if (is_inside_1_and_2 == 0) return 0.;
-    return double(is_inside_1_and_2) / double(is_inside_2);
-    }
-/* Reimplementation of function above with different input */
-double polygon_overlap(vector<Vector3D>& polygon1, vector<Vector3D>& polygon2, int nbins=30){
-    // Convert to vector<double>; Would have been better to not have a copy here,
-    // but the other algos get hard to write then
-    std::size_t n(polygon1.size());
-    vector<double> polygon1_x(n), polygon1_y(n), polygon2_x(n), polygon2_y(n);
-    for (std::size_t i=0; i<n; ++i){
-        polygon1_x[i] = polygon1[i].x_;
-        polygon1_y[i] = polygon1[i].y_;
-        polygon2_x[i] = polygon2[i].x_;
-        polygon2_y[i] = polygon2[i].y_;
-        }
-    return polygon_overlap(polygon1_x, polygon1_y, polygon2_x, polygon2_y, nbins);
-    }
-
-pair<double, double> calculate_shower_overlap(Node& t1, Node& t2){
-    //reading energy containment thresholds : t1 and t2 both have the same thresholds of course, so it's irrelevant from which node to read them
-    vector<double> transverse_containment = t1.merging_thresholds_transv_;
-    vector<double> longitudinal_containment = t1.merging_thresholds_longitud_ ;     
-    if (t1.boundary_momentum_.E() < t2.boundary_momentum_.E()) std::swap(t1,t2);
-    double f_radius;
-    if(t1.is_hadron_ != t2.is_hadron_) f_radius = transverse_containment[0];
-    else if (t1.is_hadron_ && t2.is_hadron_) f_radius = transverse_containment[1];
-    else f_radius = transverse_containment[2];
-
-    //take the max overlap here
-    //so far only for circle overlaps
-    double rcircle_overlap_max=0;
-    double deltaz_atmax=1000;
-
-    for(size_t t1i=0; t1i<t1.boundary_positions_.size();t1i++){
-        auto  t1_energy_containment_radii_ = t1.energy_containment_radiivec_.at(t1i); //TBD map [] is not const, whole structure should be revised
-        const auto & t1_b = t1.boundary_positions_.at(t1i);
-        const auto & t1_e = t1.centroids_.at(t1i);
-        const auto & t1_rotation_ = t1.rotations_.at(t1i);
-        const auto & t1_inv_rotation_ = t1.inv_rotations_.at(t1i);
-
-        double t1_r = std::max(t1_energy_containment_radii_[f_radius], 1.0);
-
-        for(size_t t2i=0;t2i<t2.boundary_positions_.size();t2i++){
-
-            auto t2_energy_containment_radii_ = t2.energy_containment_radiivec_.at(t2i);
-
-          //  const auto& t2_b = t2.boundary_positions_.at(t2i);
-            const auto& t2_e = t2.centroids_.at(t2i);
-            const auto& t2_inv_rotation_ = t2.inv_rotations_.at(t2i);
-
-            double t2_r = std::max(t2_energy_containment_radii_[f_radius], 1.0);//TBD also needs to be checked: no reason to call max here every time
+            if(rsum*rsum<distsq)
+                continue; //can't overlap
 
 
-            Vector3D t1_re = t1_rotation_.dot(t1_e-t1_b);
-            // Vector3D t2_rb = t1.rotation_.dot(t2_b-t1_b);
-            // Vector3D t2_re = t1.rotation_.dot(t2_e-t1_b);
+            //JUST SIMPLE. either hits the others centre: this
+            //works because the sensor radius is part of the circles
+            auto maxrad = std::max(na->circle_radius_,nb->circle_radius_);
+            if(distsq<maxrad*maxrad)
+                max_overlap=1;
+            continue;
 
-            vector<Vector3D> t1_rcircle = t1_inv_rotation_.dot(get_circle(t1_r)) + t1_re;
-            vector<Vector3D> t2_rcircle = t1_rotation_.dot(
-                    t2_inv_rotation_.dot(get_circle(t2_r)) + t2_e - t1_b
-            );
-            double rcircle_overlap = polygon_overlap(t1_rcircle, t2_rcircle);
-            double deltaz = longitudinal_distance(t1, t2, longitudinal_containment);
+            //maybe this doesn't even need to be area but just a distance measure!
+            // (OPT possible) because overlap area is monotone function of that
 
-            if(rcircle_overlap_max<rcircle_overlap){
-                rcircle_overlap_max=rcircle_overlap;
-                deltaz_atmax=deltaz;
-            }
+            double overlap = calculate_circle_overlap(std::sqrt(distsq),
+                    na->circle_radius_,nb->circle_radius_);
+            //normalise overlap here
+            double minrad = std::min(na->circle_radius_, nb->circle_radius_);
+
+            overlap /= PI * minrad*minrad;
+
+            //std::cout << "rel overlap " << overlap << std::endl; //DEBUG
+            //do something with boundary_time_ here if you want
+
+            if(overlap>max_overlap)
+                max_overlap=overlap;
+
         }
     }
-    //end loop
-
-    return std::make_pair(rcircle_overlap_max, deltaz_atmax);
-    }
-
-
-class CachedOverlapFn {
-    public:
-        CachedOverlapFn() {}
-        ~CachedOverlapFn() {}
-
-        pair<double, double> get(Node* t1, Node* t2){
-            if (t1->boundary_momentum_.E() < t2->boundary_momentum_.E()) std::swap(t1,t2);
-            pair<int,int> p = std::make_pair(t1->trackid_, t2->trackid_);
-            if (cache_.count(p) == 0)
-                cache_[p] = calculate_shower_overlap(*t1, *t2);
-            return cache_[p];
-            }
-
-        /* Clears the cache for two tracks in one go */
-        void clear(Node* t1, Node* t2){
-            auto it = cache_.begin();
-            while(it != cache_.end()){
-                auto key = (*it).first;
-                if (
-                    key.first == t1->trackid_ || key.second == t1->trackid_ ||
-                    key.first == t2->trackid_ || key.second == t2->trackid_
-                    )
-                    it = cache_.erase(it);
-                else
-                    it++;
-                }
-            }
-
-        void insert(int i, int j, double a, double b){
-            cache_[std::make_pair(i,j)] = std::make_pair(a,b);
-            }
-
-        std::string print() const {
-            std::stringstream ss;
-            for(auto it: cache_){
-                ss  << "(" << it.first.first << "," << it.first.second << ") = "
-                    << it.second.first << ", " << it.second.second << "\n"
-                    ;
-                }
-            return ss.str();
-            }
-
-    private:
-        map<pair<int,int>, pair<double,double>> cache_;  
-    };
+    return max_overlap;
+}
 
 
 
@@ -953,7 +782,7 @@ void trim_tree(Node* root){
     // Either a track that has hits, or an ancestor thereof
     std::set<int> trackids_with_hits_or_parents_thereof;
     for (auto& node : *root){
-        if (!(node.hasHits())) continue;
+        if (!(node.hadHits())) continue;
         // Iterate upwards and save in the set
         for (auto it=node.begin_up(); it!=node.end_up(); it++){
             trackids_with_hits_or_parents_thereof.insert(it->trackid_);
@@ -983,7 +812,7 @@ void trim_tree(Node* root){
     // and avoid modifying relationships mid-loop
     for (auto node_depth_pair : dfs(root)){
         Node* node = node_depth_pair.first;
-        if (node->hasParent() && (node->children_.size()==1) && !(node->hasHits())){
+        if (node->hasParent() && (node->children_.size()==1) && !(node->hadHits())){
             remove_intermediate_node(node);
             }
         }
@@ -993,14 +822,14 @@ void trim_tree(Node* root){
 /* Compute a distance measure between two nodes: now simply distance between the hit centroids */
 //not needed
 
-bool merge_leafparent(Node* leafparent, double min_overlap, CachedOverlapFn& overlapfn){
+bool merge_leafparent(Node* leafparent, double min_overlap){
     edm::LogVerbatim("SimMerging") << "  Merging leafparent " << leafparent->trackid_;
     bool didUpdate = false;
     // Copy list of potentially mergeable nodes
     vector<Node*> mergeable = leafparent->children_;
     leafparent->children_.clear();
     // Parent itself can be mergeable, if it has hits and is not a root
-    if (leafparent->hasParent() && leafparent->hasHits()) mergeable.push_back(leafparent);
+    if (leafparent->hasParent() && leafparent->hadHits()) mergeable.push_back(leafparent);
     // Start merging
     while(true){
         bool break_early = false;
@@ -1013,36 +842,24 @@ bool merge_leafparent(Node* leafparent, double min_overlap, CachedOverlapFn& ove
             Node* left = mergeable[i];
             for (int j = i+1; j < nMergeable; ++j){
                 Node* right = mergeable[j];
-                pair<double, double> p = overlapfn.get(left, right);
-                double overlap = p.first;
-                double deltaz = p.second;
-                //DIRTY HACK
-                //std::cout << "deltaz " << deltaz << std::endl;
-                deltaz=0;//no z criterion to play with the others first
+                double overlap = calculate_shower_overlap(left,right);
 
-                if (overlap > current_max_overlap && deltaz < 10.){
+                if (overlap > current_max_overlap){
                     current_max_overlap = overlap;
                     pairToMerge = (left->initial_energy_ > right->initial_energy_) ?
-                        std::make_pair(left, right) : std::make_pair(right, left);
+                            std::make_pair(left, right) : std::make_pair(right, left);
                     didUpdate = true;
                     didUpdateThisIteration = true;
                     if (overlap == 1.){
                         // It can't get higher than 1 anyway
                         break_early = true;
                         break;
-                        }
                     }
-                // double r = distance(left, right);
-                // if (r < minr){
-                //     minr = r;
-                //     pairToMerge = (left->initial_energy_ > right->initial_energy_) ?
-                //         std::make_pair(left, right) : std::make_pair(right, left);
-                //     didUpdate = true;
-                //     didUpdateThisIteration = true;
-                //     }
                 }
-            if (break_early) break;
+
             }
+            if (break_early) break;
+        }
         if (!didUpdateThisIteration) break; // Nothing to merge this iteration
         // Now do the merging
 
@@ -1068,8 +885,7 @@ bool merge_leafparent(Node* leafparent, double min_overlap, CachedOverlapFn& ove
 
         ///
 
-        overlapfn.clear(pairToMerge.first, pairToMerge.second);
-        }
+    }
     // Make a string representation of the mergeable nodes for debugging
     std::string mergeableStr = "";
     if(mergeable.size()){
@@ -1101,7 +917,7 @@ bool merge_leafparent(Node* leafparent, double min_overlap, CachedOverlapFn& ove
         // a mergeable node), AND all nodes were merged into one cluster, assign the 
         // pdgid of the leafparent to the remaining node
         if(
-            !(leafparent->hasHits())
+            !(leafparent->hadHits())
             && mergeable.size()==1
             && mergeable[0]->pdgid_!=leafparent->pdgid_
             ){
@@ -1127,7 +943,6 @@ bool merge_leafparent(Node* leafparent, double min_overlap, CachedOverlapFn& ove
     }
 
 void merging_algo(Node* root){
-    CachedOverlapFn overlapfn;
     int iIteration = -1;
     bool didUpdate = true;
     while(didUpdate){
@@ -1140,7 +955,7 @@ void merging_algo(Node* root){
             leafparents.push_back(&node);
             }
         for (auto node : leafparents){
-            didUpdate = merge_leafparent(node, MINOVERLAP, overlapfn);
+            didUpdate = merge_leafparent(node, MINOVERLAP);
             }
         }
     edm::LogVerbatim("SimMerging") << "Done after iteration " << iIteration;
@@ -1198,6 +1013,15 @@ SimCluster simmerger::mergedSimClusterFromTrackIds(std::vector<int>& trackIds,
     return sc;
 }
 
+static Vector3D project_to_boundary(const Vector3D& toprop, const Vector3D& bpos){
+
+    SimCluster::LorentzVector vec (toprop.x_,toprop.y_, toprop.z_, 0.);
+    auto r = bpos.z_*tan(vec.theta());
+
+    SimCluster::PolarLorentzVector pvec(r, vec.Eta(), vec.Phi(), 0);
+    return Vector3D(pvec.x(),pvec.y(),pvec.z());
+}
+
 void simmerger::produce(edm::Event& iEvent, const edm::EventSetup& iSetup) {  
     edm::ESHandle<CaloGeometry> geom;
     iSetup.get<CaloGeometryRecord>().get(geom);
@@ -1220,10 +1044,18 @@ void simmerger::produce(edm::Event& iEvent, const edm::EventSetup& iSetup) {
         for (auto const & hit : handle->ptrs() ) {
             DetId id = hit->id();
             GlobalPoint position = hgcalRecHitToolInstance_.getPosition(id);
+            float radius = 2;//DEBUG FIXME needs scintillator radii
+            if(hgcalRecHitToolInstance_.isSilicon(id))
+                radius=hgcalRecHitToolInstance_.getRadiusToSide(id);
+
+            if(radius<0.5)
+                radius=0.5;
             hits.push_back(Hit(
                 position.x(), position.y(), position.z(),
                 hit->time(), hit->energy(), hit->geantTrackId(),
-                hgcalRecHitToolInstance_.getLayer(id)
+                hgcalRecHitToolInstance_.getLayer(id),
+                radius,
+                hgcalRecHitToolInstance_.isSilicon(id)
                 ));
             trackids_with_hits.insert(hit->geantTrackId());
             }
@@ -1299,6 +1131,9 @@ void simmerger::produce(edm::Event& iEvent, const edm::EventSetup& iSetup) {
 #ifdef EDM_ML_DEBUG
     edm::LogVerbatim("SimMerging") << "Splitting into positive and negative endcap";
 #endif
+
+
+    //Jan comment: presumably that's where we can split by particle
     Node* pos(new Node());
     Node* neg(new Node());
     for(auto child: root->children_){
@@ -1315,39 +1150,76 @@ void simmerger::produce(edm::Event& iEvent, const edm::EventSetup& iSetup) {
 #ifdef EDM_ML_DEBUG
     edm::LogVerbatim("SimMerging") << "Flipping all z's in negative endcap for merging algorithm";
 #endif
-    for (auto& node : *neg){
-        node.flipz();
-        node.calculate_shower_variables();
-        }
 
-    // Testing code for development
-    // Node* t1 = find_in_tree(neg, 411358);
-    // Node* t2 = find_in_tree(neg, 419854);
-    // edm::LogVerbatim("SimMerging") << "Found track " << t1->trackid_;
-    // edm::LogVerbatim("SimMerging") << "Found track " << t2->trackid_;
-    // t1->calculate_shower_variables();
-    // t2->calculate_shower_variables();
 
-    // CachedOverlapFn overlapfn;
-    // overlapfn.get(t1, t2);;
-    // pair<double,double> overlap = calculate_shower_overlap(*t1, *t2);
-    // edm::LogVerbatim("SimMerging")
-    //     << "Overlap: " << overlap.first
-    //     << ", dz: " << overlap.second
-    //     ;
-
-#ifdef EDM_ML_DEBUG
-    edm::LogVerbatim("SimMerging") << "Running merging algo...";
-#endif
-    merging_algo(neg);
 
 #ifdef EDM_ML_DEBUG
     edm::LogVerbatim("SimMerging") << "Printing neg " << neg->trackid_ << " after merging_algo";
     edm::LogVerbatim("SimMerging") << neg->stringrep() << "\n";
 #endif
 
-    for (auto& node : *pos) node.calculate_shower_variables();
+
+    //DIRTY plot
+
+    std::cout << "pos side " << std::endl; //DEBUG
+
+
+    static int counter=0;
+    auto s= std::to_string(counter);
+    counter++;
+
+
+    TCanvas cv;
+    TH2D h("","",100,-200,200,100,-200,200);
+    std::vector<TEllipse*> allell;
+
+    for (auto& node : *pos){
+        node.calculate_shower_variables();
+
+        //plotting here, can be removed later
+        if(node.hadHits()){//plot one bigone
+            auto bpos = node.boundary_position_;
+            for(const auto& hit:node.hits_){
+                //simple eta phi projection
+                auto projvec = project_to_boundary(Vector3D(hit->x_,hit->y_, hit->z_),bpos);
+                h.Fill(projvec.x_,projvec.y_);
+
+            }
+            auto projvec = project_to_boundary(node.centroid_,node.boundary_position_);
+
+            auto ell = new TEllipse(projvec.x_,
+                    projvec.y_, node.circle_radius_, node.circle_radius_);
+            if(!node.isdense_)
+                ell->SetLineColor(kRed);
+            ell->SetFillStyle(0);
+            allell.push_back(ell);
+        }
+
+
+        node.clearHits();
+
+    }
+    h.Draw("colz");
+    cv.SetLogz();
+    for(auto& el:allell)
+        el->Draw("same");
+    cv.Print((TString)"test_all"+s+".pdf");
+    for(auto e:allell)
+        delete e;
+
+
+
+    ///DIRTY PLOT END
+
     merging_algo(pos);
+
+    std::cout << "neg side " << std::endl; //DEBUG
+    for (auto& node : *neg){
+        node.flipz();
+        node.calculate_shower_variables();
+        node.clearHits();
+    }
+    merging_algo(neg);
 
     // Fill the output; the clusters are the remaining nodes (except the root)
     edm::Handle<edm::Association<SimClusterCollection>> simTrackToSimClusterHandle;
