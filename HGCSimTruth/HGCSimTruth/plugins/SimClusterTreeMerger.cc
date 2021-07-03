@@ -53,6 +53,9 @@ using std::pair;
 #include <cmath>
 //END DIRTY PLOTTING
 
+
+
+
 #define EDM_ML_DEBUG
 #define PI 3.14159265358979323846
 
@@ -335,14 +338,23 @@ class Node {
             //now select only the first 5 layers
             vector<Hit*> newhits;
             for(const auto h:hits_){
-                if(h->layer_<minlayer+1){
+                if(h->layer_<minlayer+20){
                     newhits.push_back(h);
                 }
             }
             hits_=newhits;
 
-            if(hits_.size()<7)
+            if(hits_.size()<7){
+                hits_=hitcp;
                 return;
+            }
+
+            //lowest 5 layers
+            //start with smallest distance to boundary
+            //check how many hits are dense = distance to next<2.*radius
+            //stop calculating radius once next-nearest is not dense anymore
+            //next nearest to axis, starting from first layer hit
+            //for merging: also take into account boundary compat. (just important for backscatter&scraping)
 
             centroid_ = ( ::hitcentroid(hits_));
 
@@ -385,7 +397,7 @@ class Node {
             for (std::size_t i = 0; i < cumsum_energies_to_axis.size()-1; ++i) {
                 double cumsum_this = cumsum_energies_to_axis[i] / total_energy;
                 double cumsum_next = cumsum_energies_to_axis[i+1] / total_energy;
-                double threshold = 0.1;//scale later
+                double threshold = 0.3;//scale later
                 circle_radius_ = d_to_axis[i+1];//DEBUG
                 if(d_to_axis[i] < 5.*ordered_hits[i]->radius_){//is there any sort of dense core?
                     isdense_=true;
@@ -394,9 +406,13 @@ class Node {
                     break;
 
             }
+            //circle_radius_/=5.;
             if(circle_radius_<MINCIRCLERADIUS)
                 circle_radius_=MINCIRCLERADIUS;//
+            hits_=hitcp;
 
+            if(boundary_momentum_.energy() < 0.5)
+                circle_radius_=MINCIRCLERADIUS;//merge them into others but don't merge into them
 
         }
 
@@ -617,6 +633,91 @@ class Node {
         Vector3D centroid_;
 
     };
+
+
+//just debugging classes here
+#include "TTree.h"
+#include "TFile.h"
+class QuickTree {
+public:
+    QuickTree(){
+        clear();
+        phit_x = &hit_x;
+        phit_y = &hit_y;
+        phit_z = &hit_z;
+        phit_e = &hit_e;
+        phit_layer = &hit_layer;
+        phit_radius = &hit_radius;
+        phit_silicon  = &hit_silicon;
+
+        file_=new TFile("outfile_debug.root","RECREATE");
+        file_->cd();
+        tree_ = new TTree("tree","tree");
+        tree_->Branch("node_energy",&node_energy);
+        tree_->Branch("node_radius",&node_radius);
+        tree_->Branch("node_x",&node_x);
+        tree_->Branch("node_y",&node_y);
+        tree_->Branch("node_z",&node_z);
+        tree_->Branch("node_isdense",&node_isdense);
+
+        tree_->Branch("hit_x",&phit_x);
+        tree_->Branch("hit_y",&phit_y);
+        tree_->Branch("hit_z",&phit_z);
+        tree_->Branch("hit_e",&phit_e);
+        tree_->Branch("hit_layer",&phit_layer);
+        tree_->Branch("hit_radius",&phit_radius);
+        tree_->Branch("hit_silicon",&phit_silicon);
+    }
+    ~QuickTree(){
+        file_->cd();
+        tree_->Write();
+       // delete tree_;
+        file_->Close();
+        delete file_;
+    }
+    void writeNode(Node* node){
+        node_energy = node->boundary_momentum_.energy();
+        node_radius = node->circle_radius_;
+
+        node_x = node->boundary_position_.x_;
+        node_y = node->boundary_position_.y_;
+        node_z = node->boundary_position_.z_;
+
+        node_isdense= node->isdense_;
+
+        for(const auto& hit : node->hits_)
+            addHit(hit);
+        tree_->Fill();
+        clear();
+    }
+
+private:
+    void addHit(const Hit* h){
+        hit_x.push_back(h->x_);
+        hit_y.push_back(h->y_);
+        hit_z.push_back(h->z_);
+        hit_e.push_back(h->energy_);
+        hit_layer.push_back(h->layer_);
+        hit_radius.push_back(h->radius_);
+        hit_silicon.push_back(h->issilicon_);
+    }
+    void clear(){
+        node_energy=0; node_radius=0; node_x=0; node_y=0; node_z=0;
+        hit_x.clear(); hit_y.clear(); hit_z.clear(); hit_e.clear();
+        hit_layer.clear(); hit_radius.clear(); hit_silicon.clear();
+        node_isdense=false;
+    }
+
+    TTree * tree_;
+    TFile * file_;
+    std::vector<double> hit_x, hit_y, hit_z, hit_e, hit_layer, hit_radius, hit_silicon;
+    std::vector<double> * phit_x, * phit_y, * phit_z, * phit_e, * phit_layer, * phit_radius, * phit_silicon;
+    double node_energy, node_radius, node_x, node_y, node_z;
+    bool node_isdense;
+
+};
+////end debugging
+
 
 /* Finds a track by trackid in a tree */
 Node* find_in_tree(Node* root, int trackid){
@@ -1173,11 +1274,16 @@ void simmerger::produce(edm::Event& iEvent, const edm::EventSetup& iSetup) {
     TH2D h("","",100,-200,200,100,-200,200);
     std::vector<TEllipse*> allell;
 
+    QuickTree * qtree = new QuickTree();
+
     for (auto& node : *pos){
         node.calculate_shower_variables();
 
         //plotting here, can be removed later
         if(node.hadHits()){//plot one bigone
+
+            qtree->writeNode(&node);
+
             auto bpos = node.boundary_position_;
             for(const auto& hit:node.hits_){
                 //simple eta phi projection
@@ -1208,6 +1314,7 @@ void simmerger::produce(edm::Event& iEvent, const edm::EventSetup& iSetup) {
         delete e;
 
 
+    delete qtree;
 
     ///DIRTY PLOT END
 
