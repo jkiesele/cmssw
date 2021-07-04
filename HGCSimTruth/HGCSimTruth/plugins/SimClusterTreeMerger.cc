@@ -71,7 +71,7 @@ all the existing classes are missing needed functionality for the
 merging algorithm.
 */
 struct Vector3D{
-    Vector3D() {}
+    Vector3D() : x_(0), y_(0), z_(0) {}
     Vector3D(double x, double y, double z) : x_(x), y_(y), z_(z) {}
     Vector3D(const GlobalPoint& p) : x_(p.x()), y_(p.y()), z_(p.z()) {}
     Vector3D(const Vector3D& p) : x_(p.x_), y_(p.y_), z_(p.z_) {}
@@ -314,11 +314,15 @@ class Node {
         void calculate_shower_variables(){
             if (nhits() == 0) return;
 
-            if(!isLeaf()){
-               // circle_radius_=0;
-               // std::cout << "calculating shower variables for non leaf node?" << std::endl;//DEBUG
-               // return;
-            }
+
+            //configuration parameters:
+            int use_n_first_layers=1;
+            float consider_radius_multi=2.;
+            float consider_radius_multi_final=2.;
+            float first_search_radius_multi = 3.;
+            float en_containment=0.5;
+
+
             //DIRTY HACKS HERE
             auto hitcp = hits_;
             //find lower layer number
@@ -328,26 +332,22 @@ class Node {
                 if(h->energy_>highestenergy)
                     highestenergy=h->energy_;
             }
-            double energycut = std::min(0.00005, highestenergy);
+            double energycut = std::min(0.0000, highestenergy);
             for(const auto h:hits_){
                 if(h->energy_ < energycut)
                     continue;
                 if(h->layer_<minlayer)
                     minlayer = h->layer_;
             }
-            //now select only the first 5 layers
+            //now select only the first N layers
             vector<Hit*> newhits;
             for(const auto h:hits_){
-                if(h->layer_<minlayer+20){
+                if(h->layer_<minlayer+use_n_first_layers){
                     newhits.push_back(h);
                 }
             }
             hits_=newhits;
 
-            if(hits_.size()<7){
-                hits_=hitcp;
-                return;
-            }
 
             //lowest 5 layers
             //start with smallest distance to boundary
@@ -356,7 +356,88 @@ class Node {
             //next nearest to axis, starting from first layer hit
             //for merging: also take into account boundary compat. (just important for backscatter&scraping)
 
+            //
+
+
+            //determine if it's dense:
+
+
+
+            Vector3D axis (boundary_momentum_.X(),boundary_momentum_.Y(), boundary_momentum_.Z());
+            axis= axis/axis.norm();
+
+
+            //consider valid if distance to axis < radius
+
+            //here, find the hit closest to truth axis within a certain
+            //radius that seems reasonable, then center new truth axis around that one
+            //don't split this by layer
+
+
+            //can enforce by layer distances by scaling z a lot, and then
+            //only taking xy of distance
+            vector<double> dtmp;
+
+            double ensum=0;
+            for(const auto& hit: hits_){
+                ensum+=hit->energy_;
+                auto hit_pos = hit->vector3d() - boundary_position_;
+                auto projection_along_axis = hit_pos.dot(axis) * axis;
+                auto dist_to_axis = hit_pos-projection_along_axis;
+                dtmp.push_back(dist_to_axis.norm());
+            }
+
+
+            auto ldsort = argsort(dtmp);
+            apply_argsort_in_place(dtmp,ldsort);
+            apply_argsort_in_place(hits_,ldsort);
+
+            //hits.size>0 guaranteed
+            auto centerhit = hits_.at(0);
+
+            isdense_ = dtmp.at(0) < first_search_radius_multi * centerhit->radius_;
+            //see if it is a dense node
+            std::cout << dtmp.at(0) <<  " vs " << centerhit->radius_ <<" is dense " << isdense_<< std::endl;
+            circle_radius_=MINCIRCLERADIUS;
+            if(!isdense_)
+                return;
+
+
+            Vector3D centerhitpos = centerhit->vector3d();
+            double tmpcircle=0;
+            double maxradiusadd=centerhit->radius_;
+            double tmpensum=0;
+            for(auto hit: hits_){
+                auto hitpos = hit->vector3d();
+                auto dist = (centerhitpos-hitpos).norm();
+                double totcircle = tmpcircle+consider_radius_multi*hit->radius_;
+
+                if( ensum * en_containment < tmpensum)
+                    break;
+
+                if(totcircle > dist){//only add direct neighbours
+                    tmpcircle = dist;
+                    if(maxradiusadd<hit->radius_)
+                        maxradiusadd=hit->radius_;
+
+                    tmpensum+=hit->energy_;
+                }else{
+                   // break;
+                }
+                //some energy criterion
+            }
+            circle_radius_ = tmpcircle + consider_radius_multi_final*maxradiusadd;
+
+
+            std::cout << "final circle_radius_ " <<circle_radius_<< std::endl; //DEBUG
+
+
+
             centroid_ = ( ::hitcentroid(hits_));
+
+            return;
+
+            /*
 
             //is it the axis? this only works for straight lines..
             //pca like would be useful here FIXME
@@ -413,7 +494,7 @@ class Node {
 
             if(boundary_momentum_.energy() < 0.5)
                 circle_radius_=MINCIRCLERADIUS;//merge them into others but don't merge into them
-
+*/
         }
 
         /* Standard depth-first-search tree traversal as an iterator */
