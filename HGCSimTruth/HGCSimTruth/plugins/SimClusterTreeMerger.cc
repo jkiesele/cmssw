@@ -172,9 +172,9 @@ std::ostream& operator<<(std::ostream& os, const RotMat3D& m){
 
 
 struct Hit {
-    Hit(double x, double y, double z, double t, double energy, int trackid, int layer, float radius, bool issilicon) :
+    Hit(double x, double y, double z, double t, double energy, int trackid, int layer, float radius, bool issilicon, float time) :
         x_(x), y_(y), z_(z), t_(t), energy_(energy), trackid_(trackid),layer_(layer),radius_(radius),
-        issilicon_(issilicon){}
+        issilicon_(issilicon),time_(time){}
     ~Hit() {}
     double x_;
     double y_;
@@ -187,6 +187,7 @@ struct Hit {
     Vector3D vector3d(){return Vector3D(x_, y_, z_);}
     float radius_;
     bool issilicon_;
+    float time_;
     };
 
 /* Computes the 'average' position of a list of hits */
@@ -376,7 +377,7 @@ class Node {
 
             //can enforce by layer distances by scaling z a lot, and then
             //only taking xy of distance
-            vector<double> dtmp;
+            vector<double> dtmp,ttmp;
 
             double ensum=0;
             for(const auto& hit: hits_){
@@ -385,16 +386,19 @@ class Node {
                 auto projection_along_axis = hit_pos.dot(axis) * axis;
                 auto dist_to_axis = hit_pos-projection_along_axis;
                 dtmp.push_back(dist_to_axis.norm());
+                ttmp.push_back(hit->time_);
             }
 
-
-            auto ldsort = argsort(dtmp);
+            //sort by time
+            auto ldsort = argsort(ttmp);
             apply_argsort_in_place(dtmp,ldsort);
+            apply_argsort_in_place(ttmp,ldsort);
             apply_argsort_in_place(hits_,ldsort);
 
-            //hits.size>0 guaranteed
+            //hits.size>0 guaranteed, use the first hit in time
             auto centerhit = hits_.at(0);
 
+            //see if it is compatible with the axis
             isdense_ = dtmp.at(0) < first_search_radius_multi * centerhit->radius_;
             //see if it is a dense node
             //std::cout << dtmp.at(0) <<  " vs " << centerhit->radius_ <<" is dense " << isdense_<< std::endl;
@@ -1163,6 +1167,7 @@ void simmerger::produce(edm::Event& iEvent, const edm::EventSetup& iSetup) {
             if(hgcalRecHitToolInstance_.isSilicon(id))
                 radius=hgcalRecHitToolInstance_.getRadiusToSide(id);
 
+
             if(radius<0.5)
                 radius=0.5;
             hits.push_back(Hit(
@@ -1170,7 +1175,8 @@ void simmerger::produce(edm::Event& iEvent, const edm::EventSetup& iSetup) {
                 hit->time(), hit->energy(), hit->geantTrackId(),
                 hgcalRecHitToolInstance_.getLayer(id),
                 radius,
-                hgcalRecHitToolInstance_.isSilicon(id)
+                hgcalRecHitToolInstance_.isSilicon(id),
+                hit->time()
                 ));
             trackids_with_hits.insert(hit->geantTrackId());
             }
