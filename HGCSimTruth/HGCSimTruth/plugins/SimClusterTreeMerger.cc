@@ -60,7 +60,7 @@ using std::pair;
 #define PI 3.14159265358979323846
 
 #define MINOVERLAP 0.3
-#define MINCIRCLERADIUS 1.
+#define MINCIRCLERADIUS .1
 
 typedef edm::AssociationMap<edm::OneToManyWithQualityGeneric<
     SimClusterCollection, SimClusterCollection, float>> SimClusterToSimClusters;
@@ -397,7 +397,7 @@ class Node {
 
             isdense_ = dtmp.at(0) < first_search_radius_multi * centerhit->radius_;
             //see if it is a dense node
-            std::cout << dtmp.at(0) <<  " vs " << centerhit->radius_ <<" is dense " << isdense_<< std::endl;
+            //std::cout << dtmp.at(0) <<  " vs " << centerhit->radius_ <<" is dense " << isdense_<< std::endl;
             circle_radius_=MINCIRCLERADIUS;
             if(!isdense_)
                 return;
@@ -428,73 +428,13 @@ class Node {
             }
             circle_radius_ = tmpcircle + consider_radius_multi_final*maxradiusadd;
 
+            //std::cout << "final circle_radius_ " <<circle_radius_<< std::endl; //DEBUG
 
-            std::cout << "final circle_radius_ " <<circle_radius_<< std::endl; //DEBUG
-
-
-
+            //this is just for debugging they are not used anywhere anymore
+            hits_=hitcp;
             centroid_ = ( ::hitcentroid(hits_));
 
-            return;
 
-            /*
-
-            //is it the axis? this only works for straight lines..
-            //pca like would be useful here FIXME
-            //but maybe taking this as first approx, and then calculate correction rather than full PCA?
-            auto axis_  = ((centroid_-boundary_position_) / (centroid_-boundary_position_).norm());
-
-
-            // Compute the transverse distances from hits to the shower axis
-            vector<double> d_to_axis;
-            vector<double> d_along_axis;
-            vector<double> energies;
-            double total_energy = 0.;
-            for(auto hit : hits_){
-                Vector3D hit_pos = hit->vector3d() - boundary_position_;
-                Vector3D projection_along_axis = hit_pos.dot(axis_) * axis_;
-                d_along_axis.push_back(projection_along_axis.norm());
-                //NEW!!
-                //DIRTY HACK FIXME just for testing DEBUG
-                double thisd= 2.*hit->radius_ + (hit_pos - projection_along_axis).norm();
-                d_to_axis.push_back(thisd);
-                //notice 2* radius gets added, and is therefore kind of a lower limit
-                energies.push_back(hit->energy_);
-                total_energy += hit->energy_;
-            }
-
-            vector<std::size_t> order = argsort(d_to_axis);
-            apply_argsort_in_place(d_to_axis, order);
-            vector<double> cumsum_energies_to_axis = cumsum(apply_argsort(energies, order));
-            auto ordered_hits = apply_argsort(hits_, order);
-
-            // Find the energy containment radii
-            // vector<double> thresholds = { .3, .75, .85 };
-
-            //FIXME, we need to actually use the right radii here!
-            //but shouldn't change the execution time a lot
-
-            isdense_=false;
-            for (std::size_t i = 0; i < cumsum_energies_to_axis.size()-1; ++i) {
-                double cumsum_this = cumsum_energies_to_axis[i] / total_energy;
-                double cumsum_next = cumsum_energies_to_axis[i+1] / total_energy;
-                double threshold = 0.3;//scale later
-                circle_radius_ = d_to_axis[i+1];//DEBUG
-                if(d_to_axis[i] < 5.*ordered_hits[i]->radius_){//is there any sort of dense core?
-                    isdense_=true;
-                }
-                if (cumsum_next > threshold)
-                    break;
-
-            }
-            //circle_radius_/=5.;
-            if(circle_radius_<MINCIRCLERADIUS)
-                circle_radius_=MINCIRCLERADIUS;//
-            hits_=hitcp;
-
-            if(boundary_momentum_.energy() < 0.5)
-                circle_radius_=MINCIRCLERADIUS;//merge them into others but don't merge into them
-*/
         }
 
         /* Standard depth-first-search tree traversal as an iterator */
@@ -680,13 +620,6 @@ class Node {
             }
             rhs->children_.clear();
 
-            //non dense nodes can *be* merged but cannot contribute to area after first merge anymore
-            if(!isdense_){
-                circle_radius_=0.1;//set low
-            }
-            if(!rhs->isdense_){
-                rhs->circle_radius_=0.1;
-            }
 
             hadhits_ |= rhs->hadhits_;
         }
@@ -863,8 +796,8 @@ double calculate_shower_overlap(Node* t1, Node* t2){
 
             //JUST SIMPLE. either hits the others centre: this
             //works because the sensor radius is part of the circles
-            auto maxrad = std::max(na->circle_radius_,nb->circle_radius_);
-            if(distsq<maxrad*maxrad)
+
+            if(distsq<rsum*rsum*0.8)
                 max_overlap=1;
             continue;
 
