@@ -59,7 +59,6 @@ using std::pair;
 #define EDM_ML_DEBUG
 #define PI 3.14159265358979323846
 
-#define MINOVERLAP 0.3
 #define MINCIRCLERADIUS .1
 
 typedef edm::AssociationMap<edm::OneToManyWithQualityGeneric<
@@ -283,6 +282,14 @@ void apply_argsort_in_place(
 
 class Node {
     public:
+
+    static int   useNLayers;
+    static float clusterRadiusScale;
+    static float mergeRadiusScale;
+    static float searchRadiusScale;
+    static float energyContainment;
+    static float relOverlapDistance;
+
         Node() : 
             trackid_(0), pdgid_(0), initial_energy_(0.), parent_(nullptr)
             {}
@@ -316,14 +323,6 @@ class Node {
             if (nhits() == 0) return;
 
 
-            //configuration parameters:
-            int use_n_first_layers=1;
-            float consider_radius_multi=2.;
-            float consider_radius_multi_final=2.;
-            float first_search_radius_multi = 3.;
-            float en_containment=0.5;
-
-
             //DIRTY HACKS HERE
             auto hitcp = hits_;
             //find lower layer number
@@ -343,7 +342,7 @@ class Node {
             //now select only the first N layers
             vector<Hit*> newhits;
             for(const auto h:hits_){
-                if(h->layer_<minlayer+use_n_first_layers){
+                if(h->layer_<minlayer+useNLayers){
                     newhits.push_back(h);
                 }
             }
@@ -399,7 +398,7 @@ class Node {
             auto centerhit = hits_.at(0);
 
             //see if it is compatible with the axis
-            isdense_ = dtmp.at(0) < first_search_radius_multi * centerhit->radius_;
+            isdense_ = dtmp.at(0) < searchRadiusScale * centerhit->radius_;
             //see if it is a dense node
             //std::cout << dtmp.at(0) <<  " vs " << centerhit->radius_ <<" is dense " << isdense_<< std::endl;
             circle_radius_=MINCIRCLERADIUS;
@@ -414,9 +413,9 @@ class Node {
             for(auto hit: hits_){
                 auto hitpos = hit->vector3d();
                 auto dist = (centerhitpos-hitpos).norm();
-                double totcircle = tmpcircle+consider_radius_multi*hit->radius_;
+                double totcircle = tmpcircle+clusterRadiusScale*hit->radius_;
 
-                if( ensum * en_containment < tmpensum)
+                if( ensum * energyContainment < tmpensum)
                     break;
 
                 if(totcircle > dist){//only add direct neighbours
@@ -430,7 +429,7 @@ class Node {
                 }
                 //some energy criterion
             }
-            circle_radius_ = tmpcircle + consider_radius_multi_final*maxradiusadd;
+            circle_radius_ = tmpcircle + mergeRadiusScale*maxradiusadd;
 
             //std::cout << "final circle_radius_ " <<circle_radius_<< std::endl; //DEBUG
 
@@ -653,12 +652,23 @@ class Node {
     };
 
 
+int   Node::useNLayers=1;
+float Node::clusterRadiusScale=2;
+float Node::mergeRadiusScale=2;
+float Node::searchRadiusScale=3;
+float Node::energyContainment=0.5;
+float Node::relOverlapDistance=0.9;
+
+
 //just debugging classes here
 #include "TTree.h"
 #include "TFile.h"
 class QuickTree {
 public:
-    QuickTree(){
+    QuickTree(bool enable=true){
+        file_=0;
+        if(!enable)
+            return;
         clear();
         phit_x = &hit_x;
         phit_y = &hit_y;
@@ -687,6 +697,8 @@ public:
         tree_->Branch("hit_silicon",&phit_silicon);
     }
     ~QuickTree(){
+        if(!file_)
+            return;
         file_->cd();
         tree_->Write();
        // delete tree_;
@@ -694,6 +706,8 @@ public:
         delete file_;
     }
     void writeNode(Node* node){
+        if(!file_)
+            return;
         node_energy = node->boundary_momentum_.energy();
         node_radius = node->circle_radius_;
 
@@ -749,81 +763,34 @@ Node* find_in_tree(Node* root, int trackid){
     }
 
 
-double calculate_circle_overlap(const double& d, const double& r1,
-        const double& r2){
-//from https://www.xarg.org/2016/07/calculate-the-intersection-area-of-two-circles/
-    if (d < r1 + r2) {
+float showerRelDistanceSq(Node* t1, Node* t2){
 
-        double a = r1 * r1;
-        double b = r2 * r2;
-
-        double x = (a - b + d * d) / (2 * d);
-        double z = x * x;
-        double y = sqrt(a - z);
-
-        if (d <= std::abs(r2 - r1)) {
-            return PI * std::min(a, b);
-        }
-        return a * asin(y / r1) + b * asin(y / r2) - y * (x + sqrt(z + b - a));
-    }
-    return 0;
-}
-double calculate_shower_overlap(Node* t1, Node* t2){
-    //now overlap with all children here; just one-by-one, not of union
-    //which will be more complicated
-
-    //maybe making this an explicit 'root' check plus childred check is better than copying vectors around
     vector<Node*> nodes_a = t1->children_;
     nodes_a.push_back(t1);
     vector<Node*> nodes_b = t2->children_;
     nodes_b.push_back(t2);
 
-    double max_overlap=0;
+    float minreldistance=FLT_MAX;
 
-    for(const auto & na: nodes_a){
+    for(const auto na: nodes_a){
         if(!na->circle_radius_)
             continue;
-        for(const auto& nb: nodes_b){
+        for(const auto nb: nodes_b){
             if(!nb->circle_radius_)//non leafs
                 continue;
 
-            //we could reintroduce the cachedOverlap thing here
-
-            //quick check if there can be any overlap
             auto distvec = na->boundary_position_ - nb->boundary_position_;
             double distsq = distvec.dot(distvec); //x^2 OPT possible (just take x and y)
             double rsum = na->circle_radius_+nb->circle_radius_;
 
-            if(rsum*rsum<distsq)
-                continue; //can't overlap
+            float reldist = distsq / (rsum*rsum);
 
-
-            //JUST SIMPLE. either hits the others centre: this
-            //works because the sensor radius is part of the circles
-
-            if(distsq<rsum*rsum*0.8)
-                max_overlap=1;
-            continue;
-
-            //maybe this doesn't even need to be area but just a distance measure!
-            // (OPT possible) because overlap area is monotone function of that
-
-            double overlap = calculate_circle_overlap(std::sqrt(distsq),
-                    na->circle_radius_,nb->circle_radius_);
-            //normalise overlap here
-            double minrad = std::min(na->circle_radius_, nb->circle_radius_);
-
-            overlap /= PI * minrad*minrad;
-
-            //std::cout << "rel overlap " << overlap << std::endl; //DEBUG
-            //do something with boundary_time_ here if you want
-
-            if(overlap>max_overlap)
-                max_overlap=overlap;
-
+            if(minreldistance > reldist)
+                minreldistance=reldist;
         }
     }
-    return max_overlap;
+
+    return minreldistance;
 }
 
 
@@ -941,7 +908,7 @@ void trim_tree(Node* root){
 /* Compute a distance measure between two nodes: now simply distance between the hit centroids */
 //not needed
 
-bool merge_leafparent(Node* leafparent, double min_overlap){
+bool merge_leafparent(Node* leafparent){
     edm::LogVerbatim("SimMerging") << "  Merging leafparent " << leafparent->trackid_;
     bool didUpdate = false;
     // Copy list of potentially mergeable nodes
@@ -950,10 +917,10 @@ bool merge_leafparent(Node* leafparent, double min_overlap){
     // Parent itself can be mergeable, if it has hits and is not a root
     if (leafparent->hasParent() && leafparent->hadHits()) mergeable.push_back(leafparent);
     // Start merging
+    std::cout << "while start" << std::endl;
     while(true){
-        bool break_early = false;
         bool didUpdateThisIteration = false;
-        double current_max_overlap = min_overlap;
+        float currentMinDistanceSq = FLT_MAX;
         pair<Node*,Node*> pairToMerge;
         // Compute all distances between clusters
         int nMergeable = mergeable.size();
@@ -961,23 +928,18 @@ bool merge_leafparent(Node* leafparent, double min_overlap){
             Node* left = mergeable[i];
             for (int j = i+1; j < nMergeable; ++j){
                 Node* right = mergeable[j];
-                double overlap = calculate_shower_overlap(left,right);
+                double reldistsq = showerRelDistanceSq(left,right);
 
-                if (overlap > current_max_overlap){
-                    current_max_overlap = overlap;
+                if (reldistsq < Node::relOverlapDistance*Node::relOverlapDistance
+                        && reldistsq < currentMinDistanceSq){
+                    currentMinDistanceSq = reldistsq;
                     pairToMerge = (left->initial_energy_ > right->initial_energy_) ?
                             std::make_pair(left, right) : std::make_pair(right, left);
                     didUpdate = true;
                     didUpdateThisIteration = true;
-                    if (overlap == 1.){
-                        // It can't get higher than 1 anyway
-                        break_early = true;
-                        break;
-                    }
                 }
 
             }
-            if (break_early) break;
         }
         if (!didUpdateThisIteration) break; // Nothing to merge this iteration
         // Now do the merging
@@ -1005,6 +967,8 @@ bool merge_leafparent(Node* leafparent, double min_overlap){
         ///
 
     }
+
+    std::cout << "while ends" << std::endl;
     // Make a string representation of the mergeable nodes for debugging
     std::string mergeableStr = "";
     if(mergeable.size()){
@@ -1035,6 +999,8 @@ bool merge_leafparent(Node* leafparent, double min_overlap){
         // Special case: If the leafparent had no hits (and was thus not included as
         // a mergeable node), AND all nodes were merged into one cluster, assign the 
         // pdgid of the leafparent to the remaining node
+        //JAN: we should change this to some sort of 90% energy requirement
+        //JAN: can we make this a property of Node? (since now Nodes contain all children pointers)
         if(
             !(leafparent->hadHits())
             && mergeable.size()==1
@@ -1066,6 +1032,7 @@ void merging_algo(Node* root){
     bool didUpdate = true;
     while(didUpdate){
         iIteration++;
+        didUpdate=false; //safe guard in case of no leaf nodes.
         edm::LogVerbatim("SimMerging") << "Iteration " << iIteration;
         // Build list of leaf parents in memory
         vector<Node*> leafparents;
@@ -1074,7 +1041,7 @@ void merging_algo(Node* root){
             leafparents.push_back(&node);
             }
         for (auto node : leafparents){
-            didUpdate = merge_leafparent(node, MINOVERLAP);
+            didUpdate = merge_leafparent(node);
             }
         }
     edm::LogVerbatim("SimMerging") << "Done after iteration " << iIteration;
@@ -1112,13 +1079,19 @@ simmerger::simmerger(const edm::ParameterSet& iConfig) :
     tokenSimTracks(consumes<edm::SimTrackContainer>(edm::InputTag("g4SimHits"))),
     tokenSimVertices(consumes<edm::SimVertexContainer>(edm::InputTag("g4SimHits"))),
     simClustersToken_(consumes<SimClusterCollection>(edm::InputTag("mix:MergedCaloTruth"))),
-    simTrackToSimClusterToken_(consumes<edm::Association<SimClusterCollection>>(edm::InputTag("mix:simTrackToSimCluster"))),
-    mergeThresholdsTransv_(iConfig.getParameter<vector<double > > ( "MergeTheresholdsTransv" )),
-    mergeThresholdsLongitud_(iConfig.getParameter<vector<double > > ( "MergeTheresholdsLongitud" ))
+    simTrackToSimClusterToken_(consumes<edm::Association<SimClusterCollection>>(edm::InputTag("mix:simTrackToSimCluster")))
     {
     produces<SimClusterCollection>();
     produces<edm::Association<SimClusterCollection>>();
     produces<SimClusterToSimClusters>();
+
+    Node::useNLayers = iConfig.getParameter<int32_t> ( "useNLayers" );
+    Node::searchRadiusScale = iConfig.getParameter<double> ( "searchRadiusScale" );
+    Node::clusterRadiusScale = iConfig.getParameter<double> ( "clusterRadiusScale" );
+    Node::mergeRadiusScale = iConfig.getParameter<double> ( "mergeRadiusScale" );
+    Node::energyContainment = iConfig.getParameter<double> ( "energyContainment" );
+    Node::relOverlapDistance = iConfig.getParameter<double> ( "relOverlapDistance" );
+
     }
 
 SimCluster simmerger::mergedSimClusterFromTrackIds(std::vector<int>& trackIds, 
@@ -1163,13 +1136,19 @@ void simmerger::produce(edm::Event& iEvent, const edm::EventSetup& iSetup) {
         for (auto const & hit : handle->ptrs() ) {
             DetId id = hit->id();
             GlobalPoint position = hgcalRecHitToolInstance_.getPosition(id);
-            float radius = 2;//DEBUG FIXME needs scintillator radii
+
+            float radius = 0;
             if(hgcalRecHitToolInstance_.isSilicon(id))
                 radius=hgcalRecHitToolInstance_.getRadiusToSide(id);
+            else if(hgcalRecHitToolInstance_.isScintillator(id)){
+                auto etaphi = hgcalRecHitToolInstance_.getScintDEtaDPhi(id);
+                float maxdetadphi = std::max(etaphi.first,etaphi.second);
+                radius = 0.5 * position.perp() * maxdetadphi;
+            }
+            else{
+                radius = 0;//not HGCAL
+            }
 
-
-            if(radius<0.5)
-                radius=0.5;
             hits.push_back(Hit(
                 position.x(), position.y(), position.z(),
                 hit->time(), hit->energy(), hit->geantTrackId(),
@@ -1294,8 +1273,9 @@ void simmerger::produce(edm::Event& iEvent, const edm::EventSetup& iSetup) {
     TH2D h("","",100,-200,200,100,-200,200);
     std::vector<TEllipse*> allell;
 
-    QuickTree * qtree = new QuickTree();
+    QuickTree * qtree = new QuickTree(false);//DEBUG, disabled
 
+    std::cout << "pre calc" << std::endl;
     for (auto& node : *pos){
         node.calculate_shower_variables();
 
@@ -1335,6 +1315,8 @@ void simmerger::produce(edm::Event& iEvent, const edm::EventSetup& iSetup) {
 
 
     delete qtree;
+
+    std::cout << "pre calc done" << std::endl;
 
     ///DIRTY PLOT END
 
